@@ -7,6 +7,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/storage"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/transaction/latches"
+	"github.com/pingcap-incubator/tinykv/log"
 	coppb "github.com/pingcap-incubator/tinykv/proto/pkg/coprocessor"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/kvrpcpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/tinykvpb"
@@ -38,22 +39,71 @@ func NewServer(storage storage.Storage) *Server {
 // Raw API.
 func (server *Server) RawGet(_ context.Context, req *kvrpcpb.RawGetRequest) (*kvrpcpb.RawGetResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		return &kvrpcpb.RawGetResponse{Error: err.Error()}, err
+	}
+
+	val, err := reader.GetCF(req.Cf, req.Key)
+	if err != nil {
+		return &kvrpcpb.RawGetResponse{Error: err.Error()}, err
+	}
+
+	if val == nil {
+		return &kvrpcpb.RawGetResponse{NotFound: true}, nil
+	}
+	return &kvrpcpb.RawGetResponse{Value: val}, err
 }
 
 func (server *Server) RawPut(_ context.Context, req *kvrpcpb.RawPutRequest) (*kvrpcpb.RawPutResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	err := server.storage.Write(req.Context,
+		[]storage.Modify{
+			{Data: storage.Put{
+				Key: req.Key, Value: req.Value, Cf: req.Cf}}})
+	if err != nil {
+		return &kvrpcpb.RawPutResponse{Error:err.Error()}, err
+	}
+	return &kvrpcpb.RawPutResponse{}, nil
 }
 
 func (server *Server) RawDelete(_ context.Context, req *kvrpcpb.RawDeleteRequest) (*kvrpcpb.RawDeleteResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	err := server.storage.Write(req.Context,
+		[]storage.Modify{
+			{Data: storage.Delete{
+				Key: req.Key, Cf: req.Cf}}})
+	if err != nil {
+		return &kvrpcpb.RawDeleteResponse{Error:err.Error()}, err
+	}
+	return &kvrpcpb.RawDeleteResponse{}, err
 }
 
 func (server *Server) RawScan(_ context.Context, req *kvrpcpb.RawScanRequest) (*kvrpcpb.RawScanResponse, error) {
 	// Your Code Here (1).
-	return nil, nil
+
+	reader, err := server.storage.Reader(req.Context)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	ret := new(kvrpcpb.RawScanResponse)
+	iter := reader.IterCF(req.Cf)
+	for iter.Seek(req.StartKey); iter.Valid() && req.Limit > 0; iter.Next() {
+		req.Limit--
+		key := iter.Item().Key()
+		val, err := iter.Item().Value()
+		if err != nil {
+			log.Error(err)
+			ret.Error = err.Error()
+			return ret, err
+		}
+		ret.Kvs = append(ret.Kvs, &kvrpcpb.KvPair{Key: key, Value: val})
+	}
+	return ret, nil
 }
 
 // Raft commands (tinykv <-> tinykv)
