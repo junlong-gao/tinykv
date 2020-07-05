@@ -49,12 +49,15 @@ const (
 
 const FORMAT_TIME_DAY string = "20060102"
 const FORMAT_TIME_HOUR string = "2006010215"
+const CALLDEPTH = 4 // magic = =
 
 var _log *Logger = New()
 
 func init() {
 	SetFlags(Ldate | Ltime | Lshortfile)
 	SetHighlighting(runtime.GOOS != "windows")
+	SetLevel(LOG_LEVEL_ALL)
+	_log._log.SetOutput(os.Stdout)
 }
 
 func GlobalLogger() *log.Logger {
@@ -178,7 +181,7 @@ func (l *Logger) logf(t LogType, format string, v ...interface{}) {
 	} else {
 		s = "[" + logStr + "] " + fmt.Sprintf(format, v...)
 	}
-	l._log.Output(4, s)
+	l._log.Output(CALLDEPTH, s)
 }
 
 func (l *Logger) Fatal(v ...interface{}) {
@@ -192,11 +195,13 @@ func (l *Logger) Fatalf(format string, v ...interface{}) {
 }
 
 func (l *Logger) Panic(v ...interface{}) {
-	l._log.Panic(v...)
+	l.log(LOG_FATAL, v...)
+	panic(fmt.Sprint(v))
 }
 
 func (l *Logger) Panicf(format string, v ...interface{}) {
-	l._log.Panicf(format, v...)
+	l.logf(LOG_FATAL, format, v...)
+	panic(fmt.Sprintf(format, v...))
 }
 
 func (l *Logger) Error(v ...interface{}) {
