@@ -1,3 +1,10 @@
+# Progress
+|Module|Status|
+|-|-|
+| Project 1 | [![Project1](https://junlong-gao.semaphoreci.com/badges/tinykv-project1/branches/solutions.svg)](https://junlong-gao.semaphoreci.com/projects/tinykv-project1)|
+| Project 2a| [![Project2](https://junlong-gao.semaphoreci.com/badges/tinykv-project2a/branches/solutions.svg)](https://junlong-gao.semaphoreci.com/projects/tinykv-project2a)|
+| Project 2b| TBD |
+
 # The TinyKV Course
 
 This is a series of projects on a key-value storage system built with the Raft consensus algorithm. These projects are inspired by the famous [MIT 6.824](http://nil.csail.mit.edu/6.824/2018/index.html) course, but aim to be closer to industry implementations. The whole course is pruned from [TiKV](https://github.com/tikv/tikv) and re-written in Go. After completing this course, you will have the knowledge to implement a horizontal scalable, high available, key-value storage service with distributed transaction support and a better understanding of TiKV implementation.
