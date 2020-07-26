@@ -28,7 +28,7 @@ import (
 func nextEnts(r *Raft, s *MemoryStorage) (ents []pb.Entry) {
 	// Transfer all unstable entries to "stable" storage.
 	s.Append(r.RaftLog.unstableEntries())
-	r.RaftLog.stabled = r.RaftLog.LastIndex()
+	r.RaftLog.tryStableTo(r.RaftLog.LastTerm(), r.RaftLog.LastIndex())
 
 	ents = r.RaftLog.nextEnts()
 	r.RaftLog.applied = r.RaftLog.committed
@@ -56,7 +56,7 @@ func TestProgressLeader2AB(t *testing.T) {
 	propMsg := pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{Data: []byte("foo")}}}
 	for i := 0; i < 5; i++ {
 		if pr := r.Prs[r.id]; pr.Match != uint64(i+1) || pr.Next != pr.Match+1 {
-			t.Errorf("unexpected progress %v", pr)
+			t.Fatalf("unexpected progress %v", pr)
 		}
 		if err := r.Step(propMsg); err != nil {
 			t.Fatalf("proposal resulted in error: %v", err)
@@ -82,10 +82,10 @@ func TestLeaderElection2AA(t *testing.T) {
 		tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 		sm := tt.network.peers[1].(*Raft)
 		if sm.State != tt.state {
-			t.Errorf("#%d: state = %s, want %s", i, sm.State, tt.state)
+			t.Fatalf("#%d: state = %s, want %s", i, sm.State, tt.state)
 		}
 		if g := sm.Term; g != tt.expTerm {
-			t.Errorf("#%d: term = %d, want %d", i, g, tt.expTerm)
+			t.Fatalf("#%d: term = %d, want %d", i, g, tt.expTerm)
 		}
 	}
 }
@@ -102,10 +102,10 @@ func TestLeaderCycle2AA(t *testing.T) {
 		for _, peer := range n.peers {
 			sm := peer.(*Raft)
 			if sm.id == campaignerID && sm.State != StateLeader {
-				t.Errorf("campaigning node %d state = %v, want StateLeader",
+				t.Fatalf("campaigning node %d state = %v, want StateLeader",
 					sm.id, sm.State)
 			} else if sm.id != campaignerID && sm.State != StateFollower {
-				t.Errorf("after campaign of node %d, "+
+				t.Fatalf("after campaign of node %d, "+
 					"node %d had state = %v, want StateFollower",
 					campaignerID, sm.id, sm.State)
 			}
@@ -119,7 +119,7 @@ func TestLeaderCycle2AA(t *testing.T) {
 // lower-term ones.
 func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 	cfg := func(c *Config) {
-		c.peers = idsBySize(5)
+		c.Peers = idsBySize(5)
 	}
 	// This network represents the results of the following sequence of
 	// events:
@@ -145,37 +145,38 @@ func TestLeaderElectionOverwriteNewerLogs2AB(t *testing.T) {
 	// Node 1 campaigns. The election fails because a quorum of nodes
 	// know about the election that already happened at term 2. Node 1's
 	// term is pushed ahead to 2.
+	t.Log("before campaigns")
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	sm1 := n.peers[1].(*Raft)
 	if sm1.State != StateFollower {
-		t.Errorf("state = %s, want StateFollower", sm1.State)
+		t.Fatalf("state = %s, want StateFollower", sm1.State)
 	}
 	if sm1.Term != 2 {
-		t.Errorf("term = %d, want 2", sm1.Term)
+		t.Fatalf("term = %d, want 2", sm1.Term)
 	}
 
 	// Node 1 campaigns again with a higher term. This time it succeeds.
 	n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	if sm1.State != StateLeader {
-		t.Errorf("state = %s, want StateLeader", sm1.State)
+		t.Fatalf("state = %s, want StateLeader", sm1.State)
 	}
 	if sm1.Term != 3 {
-		t.Errorf("term = %d, want 3", sm1.Term)
+		t.Fatalf("term = %d, want 3", sm1.Term)
 	}
 
 	// Now all nodes agree on a log entry with term 1 at index 1 (and
 	// term 3 at index 2).
 	for i := range n.peers {
 		sm := n.peers[i].(*Raft)
-		entries := sm.RaftLog.entries
+		entries := sm.RaftLog.allEntries()
 		if len(entries) != 2 {
 			t.Fatalf("node %d: len(entries) == %d, want 2", i, len(entries))
 		}
 		if entries[0].Term != 1 {
-			t.Errorf("node %d: term at index 1 == %d, want 1", i, entries[0].Term)
+			t.Fatalf("node %d: term at index 1 == %d, want 1", i, entries[0].Term)
 		}
 		if entries[1].Term != 3 {
-			t.Errorf("node %d: term at index 2 == %d, want 3", i, entries[1].Term)
+			t.Fatalf("node %d: term at index 2 == %d, want 3", i, entries[1].Term)
 		}
 	}
 }
@@ -211,30 +212,30 @@ func TestVoteFromAnyState2AA(t *testing.T) {
 			Index:   42,
 		}
 		if err := r.Step(msg); err != nil {
-			t.Errorf("%s,%s: Step failed: %s", vt, st, err)
+			t.Fatalf("%s,%s: Step failed: %s", vt, st, err)
 		}
 		if len(r.msgs) != 1 {
-			t.Errorf("%s,%s: %d response messages, want 1: %+v", vt, st, len(r.msgs), r.msgs)
+			t.Fatalf("%s,%s: %d response messages, want 1: %+v", vt, st, len(r.msgs), r.msgs)
 		} else {
 			resp := r.msgs[0]
 			if resp.MsgType != vt_resp {
-				t.Errorf("%s,%s: response message is %s, want %s",
+				t.Fatalf("%s,%s: response message is %s, want %s",
 					vt, st, resp.MsgType, vt_resp)
 			}
 			if resp.Reject {
-				t.Errorf("%s,%s: unexpected rejection", vt, st)
+				t.Fatalf("%s,%s: unexpected rejection", vt, st)
 			}
 		}
 
 		// If this was a vote, we reset our state and term.
 		if r.State != StateFollower {
-			t.Errorf("%s,%s: state %s, want %s", vt, st, r.State, StateFollower)
+			t.Fatalf("%s,%s: state %s, want %s", vt, st, r.State, StateFollower)
 		}
 		if r.Term != newTerm {
-			t.Errorf("%s,%s: term %d, want %d", vt, st, r.Term, newTerm)
+			t.Fatalf("%s,%s: term %d, want %d", vt, st, r.Term, newTerm)
 		}
 		if r.Vote != 2 {
-			t.Errorf("%s,%s: vote %d, want 2", vt, st, r.Vote)
+			t.Fatalf("%s,%s: vote %d, want 2", vt, st, r.Vote)
 		}
 	}
 }
@@ -264,6 +265,7 @@ func TestLogReplication2AB(t *testing.T) {
 	}
 
 	for i, tt := range tests {
+		t.Log(i)
 		tt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 
 		for _, m := range tt.msgs {
@@ -274,7 +276,7 @@ func TestLogReplication2AB(t *testing.T) {
 			sm := x.(*Raft)
 
 			if sm.RaftLog.committed != tt.wcommitted {
-				t.Errorf("#%d.%d: committed = %d, want %d", i, j, sm.RaftLog.committed, tt.wcommitted)
+				t.Fatalf("#%d.%d: committed = %d, want %d", i, j, sm.RaftLog.committed, tt.wcommitted)
 			}
 
 			ents := []pb.Entry{}
@@ -291,7 +293,7 @@ func TestLogReplication2AB(t *testing.T) {
 			}
 			for k, m := range props {
 				if !bytes.Equal(ents[k].Data, m.Entries[0].Data) {
-					t.Errorf("#%d.%d: data = %d, want %d", i, j, ents[k].Data, m.Entries[0].Data)
+					t.Fatalf("#%d.%d: data = %d, want %d", i, j, ents[k].Data, m.Entries[0].Data)
 				}
 			}
 		}
@@ -306,7 +308,7 @@ func TestSingleNodeCommit2AB(t *testing.T) {
 
 	sm := tt.peers[1].(*Raft)
 	if sm.RaftLog.committed != 3 {
-		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 3)
+		t.Fatalf("committed = %d, want %d", sm.RaftLog.committed, 3)
 	}
 }
 
@@ -326,7 +328,7 @@ func TestCommitWithoutNewTermEntry2AB(t *testing.T) {
 
 	sm := tt.peers[1].(*Raft)
 	if sm.RaftLog.committed != 1 {
-		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 1)
+		t.Fatalf("committed = %d, want %d", sm.RaftLog.committed, 1)
 	}
 
 	// network recovery
@@ -338,7 +340,7 @@ func TestCommitWithoutNewTermEntry2AB(t *testing.T) {
 	tt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgHup})
 
 	if sm.RaftLog.committed != 4 {
-		t.Errorf("committed = %d, want %d", sm.RaftLog.committed, 4)
+		t.Fatalf("committed = %d, want %d", sm.RaftLog.committed, 4)
 	}
 }
 
@@ -356,13 +358,13 @@ func TestDuelingCandidates2AB(t *testing.T) {
 	// 1 becomes leader since it receives votes from 1 and 2
 	sm := nt.peers[1].(*Raft)
 	if sm.State != StateLeader {
-		t.Errorf("state = %s, want %s", sm.State, StateLeader)
+		t.Fatalf("state = %s, want %s", sm.State, StateLeader)
 	}
 
 	// 3 stays as candidate since it receives a vote from 3 and a rejection from 2
 	sm = nt.peers[3].(*Raft)
 	if sm.State != StateCandidate {
-		t.Errorf("state = %s, want %s", sm.State, StateCandidate)
+		t.Fatalf("state = %s, want %s", sm.State, StateCandidate)
 	}
 
 	nt.recover()
@@ -386,17 +388,20 @@ func TestDuelingCandidates2AB(t *testing.T) {
 	}
 
 	for i, tt := range tests {
+		t.Log(i)
 		if g := tt.sm.State; g != tt.state {
-			t.Errorf("#%d: state = %s, want %s", i, g, tt.state)
+			t.Fatalf("#%d: state = %s, want %s", i, g, tt.state)
 		}
 		if g := tt.sm.Term; g != tt.term {
-			t.Errorf("#%d: term = %d, want %d", i, g, tt.term)
+			t.Fatalf("#%d: term = %d, want %d", i, g, tt.term)
 		}
 		base := ltoa(tt.raftLog)
 		if sm, ok := nt.peers[1+uint64(i)].(*Raft); ok {
 			l := ltoa(sm.RaftLog)
 			if g := diffu(base, l); g != "" {
-				t.Errorf("#%d: diff:\n%s", i, g)
+				t.Log(tt.raftLog)
+				t.Log(sm.RaftLog)
+				t.Fatalf("#%d: diff:\n%s", i, g)
 			}
 		} else {
 			t.Logf("#%d: empty log", i)
@@ -424,10 +429,10 @@ func TestCandidateConcede2AB(t *testing.T) {
 
 	a := tt.peers[1].(*Raft)
 	if g := a.State; g != StateFollower {
-		t.Errorf("state = %s, want %s", g, StateFollower)
+		t.Fatalf("state = %s, want %s", g, StateFollower)
 	}
 	if g := a.Term; g != 1 {
-		t.Errorf("term = %d, want %d", g, 1)
+		t.Fatalf("term = %d, want %d", g, 1)
 	}
 	wlog := newLog(&MemoryStorage{ents: []pb.Entry{{}, {Data: nil, Term: 1, Index: 1}, {Term: 1, Index: 2, Data: data}}})
 	wlog.committed = 2
@@ -436,7 +441,7 @@ func TestCandidateConcede2AB(t *testing.T) {
 		if sm, ok := p.(*Raft); ok {
 			l := ltoa(sm.RaftLog)
 			if g := diffu(wantLog, l); g != "" {
-				t.Errorf("#%d: diff:\n%s", i, g)
+				t.Fatalf("#%d: diff:\n%s", i, g)
 			}
 		} else {
 			t.Logf("#%d: empty log", i)
@@ -450,7 +455,7 @@ func TestSingleNodeCandidate2AA(t *testing.T) {
 
 	sm := tt.peers[1].(*Raft)
 	if sm.State != StateLeader {
-		t.Errorf("state = %d, want %d", sm.State, StateLeader)
+		t.Fatalf("state = %d, want %d", sm.State, StateLeader)
 	}
 }
 
@@ -479,7 +484,7 @@ func TestOldMessages2AB(t *testing.T) {
 		if sm, ok := p.(*Raft); ok {
 			l := ltoa(sm.RaftLog)
 			if g := diffu(base, l); g != "" {
-				t.Errorf("#%d: diff:\n%s", i, g)
+				t.Fatalf("#%d: diff:\n%s", i, g)
 			}
 		} else {
 			t.Logf("#%d: empty log", i)
@@ -516,7 +521,7 @@ func TestProposal2AB(t *testing.T) {
 			if sm, ok := p.(*Raft); ok {
 				l := ltoa(sm.RaftLog)
 				if g := diffu(base, l); g != "" {
-					t.Errorf("#%d: diff:\n%s", i, g)
+					t.Fatalf("#%d: diff:\n%s", i, g)
 				}
 			} else {
 				t.Logf("#%d: empty log", i)
@@ -524,7 +529,7 @@ func TestProposal2AB(t *testing.T) {
 		}
 		sm := tt.network.peers[1].(*Raft)
 		if g := sm.Term; g != 1 {
-			t.Errorf("#%d: term = %d, want %d", j, g, 1)
+			t.Fatalf("#%d: term = %d, want %d", j, g, 1)
 		}
 	}
 }
@@ -567,17 +572,17 @@ func TestHandleMessageType_MsgAppend2AB(t *testing.T) {
 
 		sm.handleAppendEntries(tt.m)
 		if sm.RaftLog.LastIndex() != tt.wIndex {
-			t.Errorf("#%d: lastIndex = %d, want %d", i, sm.RaftLog.LastIndex(), tt.wIndex)
+			t.Fatalf("#%d: lastIndex = %d, want %d", i, sm.RaftLog.LastIndex(), tt.wIndex)
 		}
 		if sm.RaftLog.committed != tt.wCommit {
-			t.Errorf("#%d: committed = %d, want %d", i, sm.RaftLog.committed, tt.wCommit)
+			t.Fatalf("#%d: committed = %d, want %d", i, sm.RaftLog.committed, tt.wCommit)
 		}
 		m := sm.readMessages()
 		if len(m) != 1 {
 			t.Fatalf("#%d: msg = nil, want 1", i)
 		}
 		if m[0].Reject != tt.wReject {
-			t.Errorf("#%d: reject = %v, want %v", i, m[0].Reject, tt.wReject)
+			t.Fatalf("#%d: reject = %v, want %v", i, m[0].Reject, tt.wReject)
 		}
 	}
 }
@@ -653,10 +658,10 @@ func TestRecvMessageType_MsgRequestVote2AA(t *testing.T) {
 			continue
 		}
 		if g := msgs[0].MsgType; g != msgRespType {
-			t.Errorf("#%d, m.MsgType = %v, want %v", i, g, msgRespType)
+			t.Fatalf("#%d, m.MsgType = %v, want %v", i, g, msgRespType)
 		}
 		if g := msgs[0].Reject; g != tt.wreject {
-			t.Errorf("#%d, m.Reject = %v, want %v", i, g, tt.wreject)
+			t.Fatalf("#%d, m.Reject = %v, want %v", i, g, tt.wreject)
 		}
 	}
 }
@@ -690,26 +695,28 @@ func TestAllServerStepdown2AB(t *testing.T) {
 		}
 
 		for j, msgType := range tmsgTypes {
+			t.Log(msgType, sm.Lead)
 			sm.Step(pb.Message{From: 2, MsgType: msgType, Term: tterm, LogTerm: tterm})
+			t.Log(sm.Lead)
 
 			if sm.State != tt.wstate {
-				t.Errorf("#%d.%d state = %v , want %v", i, j, sm.State, tt.wstate)
+				t.Fatalf("#%d.%d state = %v , want %v", i, j, sm.State, tt.wstate)
 			}
 			if sm.Term != tt.wterm {
-				t.Errorf("#%d.%d term = %v , want %v", i, j, sm.Term, tt.wterm)
+				t.Fatalf("#%d.%d term = %v , want %v", i, j, sm.Term, tt.wterm)
 			}
 			if sm.RaftLog.LastIndex() != tt.windex {
-				t.Errorf("#%d.%d index = %v , want %v", i, j, sm.RaftLog.LastIndex(), tt.windex)
+				t.Fatalf("#%d.%d index = %v , want %v", i, j, sm.RaftLog.LastIndex(), tt.windex)
 			}
 			if uint64(len(sm.RaftLog.entries)) != tt.windex {
-				t.Errorf("#%d.%d len(ents) = %v , want %v", i, j, len(sm.RaftLog.entries), tt.windex)
+				t.Fatalf("#%d.%d len(ents) = %v , want %v", i, j, len(sm.RaftLog.entries), tt.windex)
 			}
 			wlead := uint64(2)
 			if msgType == pb.MessageType_MsgRequestVote {
 				wlead = None
 			}
 			if sm.Lead != wlead {
-				t.Errorf("#%d, sm.Lead = %d, want %d", i, sm.Lead, wlead)
+				t.Fatalf("#%d, %v, %v, sm.Lead = %d, want %d", i, j, msgType, sm.Lead, wlead)
 			}
 		}
 	}
@@ -735,13 +742,13 @@ func testCandidateResetTerm(t *testing.T, mt pb.MessageType) {
 
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	if a.State != StateLeader {
-		t.Errorf("state = %s, want %s", a.State, StateLeader)
+		t.Fatalf("state = %s, want %s", a.State, StateLeader)
 	}
 	if b.State != StateFollower {
-		t.Errorf("state = %s, want %s", b.State, StateFollower)
+		t.Fatalf("state = %s, want %s", b.State, StateFollower)
 	}
 	if c.State != StateFollower {
-		t.Errorf("state = %s, want %s", c.State, StateFollower)
+		t.Fatalf("state = %s, want %s", c.State, StateFollower)
 	}
 
 	// isolate 3 and increase term in rest
@@ -751,10 +758,10 @@ func testCandidateResetTerm(t *testing.T, mt pb.MessageType) {
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 
 	if a.State != StateLeader {
-		t.Errorf("state = %s, want %s", a.State, StateLeader)
+		t.Fatalf("state = %s, want %s", a.State, StateLeader)
 	}
 	if b.State != StateFollower {
-		t.Errorf("state = %s, want %s", b.State, StateFollower)
+		t.Fatalf("state = %s, want %s", b.State, StateFollower)
 	}
 
 	for c.State != StateCandidate {
@@ -768,12 +775,12 @@ func testCandidateResetTerm(t *testing.T, mt pb.MessageType) {
 	nt.send(pb.Message{From: 1, To: 3, Term: a.Term, MsgType: mt})
 
 	if c.State != StateFollower {
-		t.Errorf("state = %s, want %s", c.State, StateFollower)
+		t.Fatalf("state = %s, want %s", c.State, StateFollower)
 	}
 
 	// follower c term is reset with leader's
 	if a.Term != c.Term {
-		t.Errorf("follower term expected same term as leader's %d, got %d", a.Term, c.Term)
+		t.Fatalf("follower term expected same term as leader's %d, got %d", a.Term, c.Term)
 	}
 }
 
@@ -935,11 +942,11 @@ func TestRecvMessageType_MsgBeat2AA(t *testing.T) {
 
 		msgs := sm.readMessages()
 		if len(msgs) != tt.wMsg {
-			t.Errorf("%d: len(msgs) = %d, want %d", i, len(msgs), tt.wMsg)
+			t.Fatalf("%d: len(msgs) = %d, want %d", i, len(msgs), tt.wMsg)
 		}
 		for _, m := range msgs {
 			if m.MsgType != pb.MessageType_MsgHeartbeat {
-				t.Errorf("%d: msg.Msgtype = %v, want %v", i, m.MsgType, pb.MessageType_MsgHeartbeat)
+				t.Fatalf("%d: msg.Msgtype = %v, want %v", i, m.MsgType, pb.MessageType_MsgHeartbeat)
 			}
 		}
 	}
@@ -960,7 +967,7 @@ func TestLeaderIncreaseNext2AB(t *testing.T) {
 
 	p := sm.Prs[2]
 	if p.Next != wnext {
-		t.Errorf("next = %d, want %d", p.Next, wnext)
+		t.Fatalf("next = %d, want %d", p.Next, wnext)
 	}
 }
 
@@ -978,14 +985,14 @@ func TestRestoreSnapshot2C(t *testing.T) {
 	sm.handleSnapshot(pb.Message{Snapshot: &s})
 
 	if sm.RaftLog.LastIndex() != s.Metadata.Index {
-		t.Errorf("log.lastIndex = %d, want %d", sm.RaftLog.LastIndex(), s.Metadata.Index)
+		t.Fatalf("log.lastIndex = %d, want %d", sm.RaftLog.LastIndex(), s.Metadata.Index)
 	}
 	if mustTerm(sm.RaftLog.Term(s.Metadata.Index)) != s.Metadata.Term {
-		t.Errorf("log.lastTerm = %d, want %d", mustTerm(sm.RaftLog.Term(s.Metadata.Index)), s.Metadata.Term)
+		t.Fatalf("log.lastTerm = %d, want %d", mustTerm(sm.RaftLog.Term(s.Metadata.Index)), s.Metadata.Term)
 	}
 	sg := nodes(sm)
 	if !reflect.DeepEqual(sg, s.Metadata.ConfState.Nodes) {
-		t.Errorf("sm.Nodes = %+v, want %+v", sg, s.Metadata.ConfState.Nodes)
+		t.Fatalf("sm.Nodes = %+v, want %+v", sg, s.Metadata.ConfState.Nodes)
 	}
 }
 
@@ -1008,7 +1015,7 @@ func TestRestoreIgnoreSnapshot2C(t *testing.T) {
 	// ignore snapshot
 	sm.handleSnapshot(pb.Message{Snapshot: &s})
 	if sm.RaftLog.committed == commit {
-		t.Errorf("commit = %d, want %d", sm.RaftLog.committed, commit)
+		t.Fatalf("commit = %d, want %d", sm.RaftLog.committed, commit)
 	}
 }
 
@@ -1039,7 +1046,7 @@ func TestProvideSnap2C(t *testing.T) {
 	}
 	m := msgs[0]
 	if m.MsgType != pb.MessageType_MsgSnapshot {
-		t.Errorf("m.MsgType = %v, want %v", m.MsgType, pb.MessageType_MsgSnapshot)
+		t.Fatalf("m.MsgType = %v, want %v", m.MsgType, pb.MessageType_MsgSnapshot)
 	}
 }
 
@@ -1057,7 +1064,7 @@ func TestRestoreFromSnapMsg2C(t *testing.T) {
 	sm.Step(m)
 
 	if sm.Lead != uint64(1) {
-		t.Errorf("sm.Lead = %d, want 1", sm.Lead)
+		t.Fatalf("sm.Lead = %d, want 1", sm.Lead)
 	}
 }
 
@@ -1088,7 +1095,7 @@ func TestSlowNodeRestore2C(t *testing.T) {
 	// trigger a commit
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 	if follower.RaftLog.committed != lead.RaftLog.committed {
-		t.Errorf("follower.committed = %d, want %d", follower.RaftLog.committed, lead.RaftLog.committed)
+		t.Fatalf("follower.committed = %d, want %d", follower.RaftLog.committed, lead.RaftLog.committed)
 	}
 }
 
@@ -1099,7 +1106,7 @@ func TestAddNode3A(t *testing.T) {
 	nodes := nodes(r)
 	wnodes := []uint64{1, 2}
 	if !reflect.DeepEqual(nodes, wnodes) {
-		t.Errorf("nodes = %v, want %v", nodes, wnodes)
+		t.Fatalf("nodes = %v, want %v", nodes, wnodes)
 	}
 }
 
@@ -1110,14 +1117,14 @@ func TestRemoveNode3A(t *testing.T) {
 	r.removeNode(2)
 	w := []uint64{1}
 	if g := nodes(r); !reflect.DeepEqual(g, w) {
-		t.Errorf("nodes = %v, want %v", g, w)
+		t.Fatalf("nodes = %v, want %v", g, w)
 	}
 
 	// remove all nodes from cluster
 	r.removeNode(1)
 	w = []uint64{}
 	if g := nodes(r); !reflect.DeepEqual(g, w) {
-		t.Errorf("nodes = %v, want %v", g, w)
+		t.Fatalf("nodes = %v, want %v", g, w)
 	}
 }
 
@@ -1125,21 +1132,21 @@ func TestCampaignWhileLeader2AA(t *testing.T) {
 	cfg := newTestConfig(1, []uint64{1}, 5, 1, NewMemoryStorage())
 	r := newRaft(cfg)
 	if r.State != StateFollower {
-		t.Errorf("expected new node to be follower but got %s", r.State)
+		t.Fatalf("expected new node to be follower but got %s", r.State)
 	}
 	// We don't call campaign() directly because it comes after the check
 	// for our current state.
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	if r.State != StateLeader {
-		t.Errorf("expected single-node election to become leader but got %s", r.State)
+		t.Fatalf("expected single-node election to become leader but got %s", r.State)
 	}
 	term := r.Term
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgHup})
 	if r.State != StateLeader {
-		t.Errorf("expected to remain leader but got %s", r.State)
+		t.Fatalf("expected to remain leader but got %s", r.State)
 	}
 	if r.Term != term {
-		t.Errorf("expected to remain in term %v but got %v", term, r.Term)
+		t.Fatalf("expected to remain in term %v but got %v", term, r.Term)
 	}
 }
 
@@ -1148,7 +1155,7 @@ func TestCampaignWhileLeader2AA(t *testing.T) {
 func TestCommitAfterRemoveNode3A(t *testing.T) {
 	// Create a cluster with two nodes.
 	s := NewMemoryStorage()
-	r := newTestRaft(1, []uint64{1, 2}, 5, 1, s)
+	r := newTestRaft(1, []uint64{1, 2, 3, 4}, 5, 1, s)
 	r.becomeCandidate()
 	r.becomeLeader()
 
@@ -1181,12 +1188,20 @@ func TestCommitAfterRemoveNode3A(t *testing.T) {
 		},
 	})
 
-	// Node 2 acknowledges the config change, committing it.
+	// Node 2 and 3 acknowledges the config change, committing it.
 	r.Step(pb.Message{
 		MsgType: pb.MessageType_MsgAppendResponse,
 		From:    2,
 		Index:   ccIndex,
+		Term:    r.Term,
 	})
+	r.Step(pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		From:    3,
+		Index:   ccIndex,
+		Term:    r.Term,
+	})
+	// Now the cluster leader:3, 2:2, 3:2, 4:1, leader will use majority of 1,3 to commit to index 2
 	ents := nextEnts(r, s)
 	if len(ents) != 2 {
 		t.Fatalf("expected two committed entries, got %v", ents)
@@ -1200,6 +1215,12 @@ func TestCommitAfterRemoveNode3A(t *testing.T) {
 
 	// Apply the config change. This reduces quorum requirements so the
 	// pending command can now commit.
+	r.Step(pb.Message{
+		MsgType: pb.MessageType_MsgAppendResponse,
+		From:    3,
+		Index:   ccIndex + 1,
+		Term:    r.Term,
+	})
 	r.removeNode(2)
 	ents = nextEnts(r, s)
 	if len(ents) != 1 || ents[0].EntryType != pb.EntryType_EntryNormal ||
@@ -1221,14 +1242,14 @@ func TestLeaderTransferToUpToDateNode3A(t *testing.T) {
 	}
 
 	// Transfer leadership to 2.
-	nt.send(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 2, To: 1, Term: nt.peers[2].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateFollower, 2)
 
 	// After some log replication, transfer leadership back to 1.
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 
-	nt.send(pb.Message{From: 1, To: 2, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 1, To: 2, Term: nt.peers[1].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateLeader, 1)
 }
@@ -1249,14 +1270,14 @@ func TestLeaderTransferToUpToDateNodeFromFollower3A(t *testing.T) {
 	}
 
 	// Transfer leadership to 2.
-	nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 2, To: 2, Term: nt.peers[2].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateFollower, 2)
 
 	// After some log replication, transfer leadership back to 1.
 	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 
-	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 1, To: 1, Term: nt.peers[1].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateLeader, 1)
 }
@@ -1275,7 +1296,7 @@ func TestLeaderTransferToSlowFollower3A(t *testing.T) {
 	}
 
 	// Transfer leadership to 3 when node 3 is lack of log.
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateFollower, 3)
 }
@@ -1298,9 +1319,9 @@ func TestLeaderTransferAfterSnapshot3A(t *testing.T) {
 	}
 
 	// Transfer leadership to 3 when node 3 is lack of snapshot.
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 	// Send pb.MessageType_MsgHeartbeatResponse to leader to trigger a snapshot for node 3.
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgHeartbeatResponse})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgHeartbeatResponse})
 
 	checkLeaderTransferState(t, lead, StateFollower, 3)
 }
@@ -1312,7 +1333,7 @@ func TestLeaderTransferToSelf3A(t *testing.T) {
 	lead := nt.peers[1].(*Raft)
 
 	// Transfer leadership to self, there will be noop.
-	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 1, To: 1, Term: nt.peers[1].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 	checkLeaderTransferState(t, lead, StateLeader, 1)
 }
 
@@ -1322,7 +1343,7 @@ func TestLeaderTransferToNonExistingNode3A(t *testing.T) {
 
 	lead := nt.peers[1].(*Raft)
 	// Transfer leadership to non-existing node, there will be noop.
-	nt.send(pb.Message{From: 4, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 4, To: 1, Term: nt.peers[1].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 	checkLeaderTransferState(t, lead, StateLeader, 1)
 }
 
@@ -1335,7 +1356,7 @@ func TestLeaderTransferReceiveHigherTermVote3A(t *testing.T) {
 	lead := nt.peers[1].(*Raft)
 
 	// Transfer leadership to isolated node to let transfer pending.
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 	nt.send(pb.Message{From: 2, To: 2, MsgType: pb.MessageType_MsgHup, Index: 1, Term: 2})
 
 	checkLeaderTransferState(t, lead, StateFollower, 2)
@@ -1348,7 +1369,7 @@ func TestLeaderTransferRemoveNode3A(t *testing.T) {
 	lead := nt.peers[1].(*Raft)
 	lead.removeNode(3)
 
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateLeader, 1)
 }
@@ -1362,10 +1383,10 @@ func TestLeaderTransferBack3A(t *testing.T) {
 
 	lead := nt.peers[1].(*Raft)
 
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	// Transfer leadership back to self.
-	nt.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 1, To: 1, Term: nt.peers[1].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateLeader, 1)
 }
@@ -1380,9 +1401,9 @@ func TestLeaderTransferSecondTransferToAnotherNode3A(t *testing.T) {
 
 	lead := nt.peers[1].(*Raft)
 
-	nt.send(pb.Message{From: 3, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 3, To: 1, Term: nt.peers[3].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 	// Transfer leadership to another node.
-	nt.send(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgTransferLeader})
+	nt.send(pb.Message{From: 2, To: 1, Term: nt.peers[2].(*Raft).Term, MsgType: pb.MessageType_MsgTransferLeader})
 
 	checkLeaderTransferState(t, lead, StateFollower, 2)
 }
@@ -1434,11 +1455,11 @@ func TestSplitVote2AA(t *testing.T) {
 	// n3.Term == 3
 	sm := nt.peers[2].(*Raft)
 	if sm.Term != 3 {
-		t.Errorf("peer 2 term: %d, want %d", sm.Term, 3)
+		t.Fatalf("peer 2 term: %d, want %d", sm.Term, 3)
 	}
 	sm = nt.peers[3].(*Raft)
 	if sm.Term != 3 {
-		t.Errorf("peer 3 term: %d, want %d", sm.Term, 3)
+		t.Fatalf("peer 3 term: %d, want %d", sm.Term, 3)
 	}
 
 	// check state
@@ -1446,11 +1467,11 @@ func TestSplitVote2AA(t *testing.T) {
 	// n3 == candidate
 	sm = nt.peers[2].(*Raft)
 	if sm.State != StateCandidate {
-		t.Errorf("peer 2 state: %s, want %s", sm.State, StateCandidate)
+		t.Fatalf("peer 2 state: %s, want %s", sm.State, StateCandidate)
 	}
 	sm = nt.peers[3].(*Raft)
 	if sm.State != StateCandidate {
-		t.Errorf("peer 3 state: %s, want %s", sm.State, StateCandidate)
+		t.Fatalf("peer 3 state: %s, want %s", sm.State, StateCandidate)
 	}
 
 	// node 2 election timeout first
@@ -1461,11 +1482,11 @@ func TestSplitVote2AA(t *testing.T) {
 	// n3.Term == 4
 	sm = nt.peers[2].(*Raft)
 	if sm.Term != 4 {
-		t.Errorf("peer 2 term: %d, want %d", sm.Term, 4)
+		t.Fatalf("peer 2 term: %d, want %d", sm.Term, 4)
 	}
 	sm = nt.peers[3].(*Raft)
 	if sm.Term != 4 {
-		t.Errorf("peer 3 term: %d, want %d", sm.Term, 4)
+		t.Fatalf("peer 3 term: %d, want %d", sm.Term, 4)
 	}
 
 	// check state
@@ -1473,11 +1494,11 @@ func TestSplitVote2AA(t *testing.T) {
 	// n3 == follower
 	sm = nt.peers[2].(*Raft)
 	if sm.State != StateLeader {
-		t.Errorf("peer 2 state: %s, want %s", sm.State, StateLeader)
+		t.Fatalf("peer 2 state: %s, want %s", sm.State, StateLeader)
 	}
 	sm = nt.peers[3].(*Raft)
 	if sm.State != StateFollower {
-		t.Errorf("peer 3 state: %s, want %s", sm.State, StateFollower)
+		t.Fatalf("peer 3 state: %s, want %s", sm.State, StateFollower)
 	}
 }
 
@@ -1651,7 +1672,7 @@ func idsBySize(size int) []uint64 {
 func newTestConfig(id uint64, peers []uint64, election, heartbeat int, storage Storage) *Config {
 	return &Config{
 		ID:            id,
-		peers:         peers,
+		Peers:         peers,
 		ElectionTick:  election,
 		HeartbeatTick: heartbeat,
 		Storage:       storage,

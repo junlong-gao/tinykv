@@ -2,6 +2,7 @@ package raft_storage
 
 import (
 	"context"
+	"github.com/pingcap-incubator/tinykv/log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -204,6 +205,7 @@ func (rs *RaftStorage) Start() error {
 		return err
 	}
 
+	log.Warningf("System bootstrapped")
 	return nil
 }
 

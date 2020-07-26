@@ -123,7 +123,7 @@ func (snapCtx *snapContext) handleApply(regionId uint64, notifier chan<- bool, s
 	err := snapCtx.applySnap(regionId, startKey, endKey, snapMeta)
 	if err != nil {
 		notifier <- false
-		log.Fatalf("failed to apply snap!!!. err: %v", err)
+		log.Panicf("region %v [%v, %v) failed to apply snap %v!!!. err: %v", regionId, startKey, endKey, snapMeta, err)
 	}
 	notifier <- true
 }

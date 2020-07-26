@@ -52,6 +52,11 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("election tick must be greater than heartbeat tick.")
 	}
 
+	if c.SchedulerHeartbeatTickInterval <= c.RaftBaseTickInterval {
+		return fmt.Errorf("schduler heartbeat tick must be larger than raft base tick")
+	}
+	//... and others too
+
 	return nil
 }
 
@@ -73,7 +78,7 @@ func NewDefaultConfig() *Config {
 		// Assume the average size of entries is 1k.
 		RaftLogGcCountLimit:                 128000,
 		SplitRegionCheckTickInterval:        10 * time.Second,
-		SchedulerHeartbeatTickInterval:      100 * time.Millisecond,
+		SchedulerHeartbeatTickInterval:      2 * time.Second,
 		SchedulerStoreHeartbeatTickInterval: 10 * time.Second,
 		RegionMaxSize:                       144 * MB,
 		RegionSplitSize:                     96 * MB,
@@ -83,8 +88,8 @@ func NewDefaultConfig() *Config {
 
 func NewTestConfig() *Config {
 	return &Config{
-		LogLevel:                 "info",
 		Raft:                     true,
+		LogLevel:                 "info",
 		RaftBaseTickInterval:     50 * time.Millisecond,
 		RaftHeartbeatTicks:       2,
 		RaftElectionTimeoutTicks: 10,

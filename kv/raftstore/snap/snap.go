@@ -5,6 +5,7 @@ import (
 	"hash"
 	"hash/crc32"
 	"io"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -410,6 +411,9 @@ func (s *Snap) readSnapshotMeta() (*rspb.SnapshotMeta, error) {
 }
 
 func (s *Snap) setSnapshotMeta(snapshotMeta *rspb.SnapshotMeta) error {
+	if snapshotMeta == nil {
+		return errors.Errorf("invalid snapshot meta data")
+	}
 	if len(snapshotMeta.CfFiles) != len(s.CFFiles) {
 		return errors.Errorf("invalid CF number of snapshot meta, expect %d, got %d",
 			len(s.CFFiles), len(snapshotMeta.CfFiles))
@@ -546,7 +550,6 @@ func (s *Snap) Build(dbSnap *badger.Txn, region *metapb.Region, snapData *rspb.R
 	if err != nil {
 		return err
 	}
-	log.Infof("region %d scan snapshot %s, key count %d, size %d", region.Id, s.Path(), builder.kvCount, builder.size)
 	err = s.saveCFFiles()
 	if err != nil {
 		return err
@@ -627,7 +630,6 @@ func (s *Snap) TotalSize() (total uint64) {
 }
 
 func (s *Snap) Save() error {
-	log.Debugf("saving to %s", s.MetaFile.Path)
 	for _, cfFile := range s.CFFiles {
 		if cfFile.Size == 0 {
 			// skip empty cf file.
@@ -687,7 +689,23 @@ func (s *Snap) Apply(opts ApplyOptions) error {
 			log.Errorf("open ingest file %s failed: %s", cfFile.Path, err)
 			return err
 		}
-		externalFiles = append(externalFiles, file)
+		// Make a copy of the snapshot files as they are hardlinked into badger
+		input, err := ioutil.ReadFile(cfFile.Path)
+		if err != nil {
+			panic(err)
+		}
+
+		dir, name := filepath.Split(cfFile.Path)
+		err = ioutil.WriteFile(filepath.Join(dir, "bak-"+name), input, 0644)
+		if err != nil {
+			panic(err)
+		}
+		file.Close()
+		dest, err := os.Open(filepath.Join(dir, "bak-"+name))
+		if err != nil {
+			panic(err)
+		}
+		externalFiles = append(externalFiles, dest)
 	}
 	n, err := opts.DB.IngestExternalFiles(externalFiles)
 	for _, file := range externalFiles {

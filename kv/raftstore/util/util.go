@@ -3,9 +3,9 @@ package util
 import (
 	"bytes"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 
 	"github.com/golang/protobuf/proto"
-	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"

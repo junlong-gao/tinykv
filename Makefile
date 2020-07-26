@@ -9,7 +9,7 @@ endif
 
 GO                  := GO111MODULE=on go
 GOBUILD             := $(GO) build $(BUILD_FLAG) -tags codes
-GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1
+GOTEST              := $(GO) test -v --count=1 --parallel=1 -p=1 -failfast -timeout 600m
 
 TEST_LDFLAGS        := ""
 
@@ -17,16 +17,7 @@ PACKAGE_LIST        := go list ./...| grep -vE "cmd"
 PACKAGES            := $$($(PACKAGE_LIST))
 
 # Targets
-.PHONY: clean test proto kv scheduler dev
-
-default: kv scheduler
-
-dev: default test
-
-test:
-	@echo "Running tests in native mode."
-	@export TZ='Asia/Shanghai'; \
-	LOG_LEVEL=fatal $(GOTEST) -cover $(PACKAGES)
+.PHONY: clean test proto kv dev
 
 CURDIR := $(shell pwd)
 export PATH := $(CURDIR)/bin/:$(PATH)
@@ -35,11 +26,20 @@ proto:
 	(cd proto && ./generate_go.sh)
 	GO111MODULE=on go build ./proto/pkg/...
 
-kv:
-	$(GOBUILD) -o bin/tinykv-server kv/main.go
+default: kv example
 
-scheduler:
-	$(GOBUILD) -o bin/tinyscheduler-server scheduler/main.go
+dev: default test
+
+example: proto
+	$(GOBUILD) -o bin/tinykv-client client/client.go
+
+test: proto
+	@echo "Running tests in native mode."
+	@export TZ='Asia/Shanghai'; \
+	LOG_LEVEL=fatal $(GOTEST) -cover $(PACKAGES)
+
+kv: proto
+	$(GOBUILD) -o bin/tinykv-server kv/main.go
 
 ci: default
 	@echo "Checking formatting"
@@ -73,16 +73,13 @@ project2b:
 project2c:
 	$(GOTEST) ./raft ./kv/test_raftstore -run 2C
 
-project3: project3a project3b project3c
+project3: project3a project3b
 
 project3a:
 	$(GOTEST) ./raft -run 3A
 
 project3b:
 	$(GOTEST) ./kv/test_raftstore -run 3B
-
-project3c:
-	$(GOTEST) ./scheduler/server ./scheduler/server/schedulers -check.f="3C"
 
 project4: project4a project4b project4c
 

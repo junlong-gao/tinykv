@@ -13,8 +13,8 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
+	schedulerpb "github.com/pingcap-incubator/tinykv/proto/pkg/pdpb"
 	rspb "github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
 	"github.com/pingcap/errors"
 )
 
@@ -58,7 +58,7 @@ func (sw *storeWorker) run(closeCh <-chan struct{}, wg *sync.WaitGroup) {
 	for {
 		var msg message.Msg
 		select {
-		case <-closeCh:
+		case _ = <-closeCh:
 			return
 		case msg = <-sw.receiver:
 		}
@@ -131,7 +131,7 @@ func (d *storeWorker) checkMsg(msg *rspb.RaftMessage) (bool, error) {
 		}
 		return false, errors.Errorf("region %d not exists but not tombstone: %s", regionID, localState)
 	}
-	log.Debugf("region %d in tombstone state: %s", regionID, localState)
+	log.Warningf("region %d in tombstone state: %s", regionID, localState)
 	region := localState.Region
 	regionEpoch := region.RegionEpoch
 	// The region in this peer is already destroyed
@@ -202,7 +202,7 @@ func (d *storeWorker) maybeCreatePeer(regionID uint64, msg *rspb.RaftMessage) (b
 		return true, nil
 	}
 	if !util.IsInitialMsg(msg.Message) {
-		log.Debugf("target peer %s doesn't exist", msg.ToPeer)
+		log.Errorf("target peer %s doesn't exist, msg %v", msg.ToPeer, msg)
 		return false, nil
 	}
 
@@ -284,11 +284,12 @@ func (d *storeWorker) handleSnapMgrGC() error {
 
 func (d *storeWorker) scheduleGCSnap(regionID uint64, keys []snap.SnapKeyWithSending) error {
 	gcSnap := message.Msg{Type: message.MsgTypeGcSnap, Data: &message.MsgGCSnap{Snaps: keys}}
-	if d.ctx.router.send(regionID, gcSnap) != nil {
+	err := d.ctx.router.send(regionID, gcSnap)
+	if err != nil {
 		// The snapshot exists because MsgAppend has been rejected. So the
 		// peer must have been exist. But now it's disconnected, so the peer
 		// has to be destroyed instead of being created.
-		log.Infof("region %d is disconnected, remove snaps %v", regionID, keys)
+		log.Warningf("err:%v region %d is disconnected, remove snaps %v", err, regionID, keys)
 		for _, pair := range keys {
 			key := pair.SnapKey
 			isSending := pair.IsSending

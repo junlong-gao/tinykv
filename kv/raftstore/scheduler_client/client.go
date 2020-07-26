@@ -25,7 +25,7 @@ import (
 	"github.com/juju/errors"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
+	schedulerpb "github.com/pingcap-incubator/tinykv/proto/pkg/pdpb"
 	"google.golang.org/grpc"
 )
 
@@ -34,7 +34,7 @@ import (
 type Client interface {
 	GetClusterID(ctx context.Context) uint64
 	AllocID(ctx context.Context) (uint64, error)
-	Bootstrap(ctx context.Context, store *metapb.Store) (*schedulerpb.BootstrapResponse, error)
+	Bootstrap(ctx context.Context, store *metapb.Store, firstRegion *metapb.Region) (*schedulerpb.BootstrapResponse, error)
 	IsBootstrapped(ctx context.Context) (bool, error)
 	PutStore(ctx context.Context, store *metapb.Store) error
 	GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error)
@@ -153,7 +153,7 @@ func (c *client) checkLeaderLoop() {
 		}
 
 		if _, err := c.updateLeader(); err != nil {
-			log.Errorf("[scheduler] failed updateLeader, err: %s", err)
+			log.Panicf("[scheduler] failed updateLeader, err: %s", err)
 		}
 	}
 }
@@ -216,7 +216,7 @@ func (c *client) getMembers(ctx context.Context, url string) (*schedulerpb.GetMe
 	if err != nil {
 		return nil, err
 	}
-	return schedulerpb.NewSchedulerClient(cc).GetMembers(ctx, new(schedulerpb.GetMembersRequest))
+	return schedulerpb.NewPDClient(cc).GetMembers(ctx, new(schedulerpb.GetMembersRequest))
 }
 
 func (c *client) getOrCreateConn(addr string) (*grpc.ClientConn, error) {
@@ -245,14 +245,14 @@ func (c *client) getOrCreateConn(addr string) (*grpc.ClientConn, error) {
 	return cc, nil
 }
 
-func (c *client) leaderClient() schedulerpb.SchedulerClient {
+func (c *client) leaderClient() schedulerpb.PDClient {
 	c.connMu.RLock()
 	defer c.connMu.RUnlock()
 
-	return schedulerpb.NewSchedulerClient(c.connMu.clientConns[c.connMu.leader])
+	return schedulerpb.NewPDClient(c.connMu.clientConns[c.connMu.leader])
 }
 
-func (c *client) doRequest(ctx context.Context, f func(context.Context, schedulerpb.SchedulerClient) error) error {
+func (c *client) doRequest(ctx context.Context, f func(context.Context, schedulerpb.PDClient) error) error {
 	var err error
 	for i := 0; i < maxRetryCount; i++ {
 		ctx1, cancel := context.WithTimeout(ctx, schedulerTimeout)
@@ -315,7 +315,7 @@ func (c *client) heartbeatStreamLoop() {
 	}
 }
 
-func (c *client) receiveRegionHeartbeat(stream schedulerpb.Scheduler_RegionHeartbeatClient, errCh chan error, wg *sync.WaitGroup) {
+func (c *client) receiveRegionHeartbeat(stream schedulerpb.PD_RegionHeartbeatClient, errCh chan error, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
 		resp, err := stream.Recv()
@@ -330,14 +330,13 @@ func (c *client) receiveRegionHeartbeat(stream schedulerpb.Scheduler_RegionHeart
 	}
 }
 
-func (c *client) reportRegionHeartbeat(ctx context.Context, stream schedulerpb.Scheduler_RegionHeartbeatClient, errCh chan error, wg *sync.WaitGroup) {
+func (c *client) reportRegionHeartbeat(ctx context.Context, stream schedulerpb.PD_RegionHeartbeatClient, errCh chan error, wg *sync.WaitGroup) {
 	defer wg.Done()
 	for {
 		request, ok := c.getNextHeartbeatRequest(ctx)
 		if !ok {
 			return
 		}
-
 		request.Header = c.requestHeader()
 		err := stream.Send(request)
 		if err != nil {
@@ -382,7 +381,7 @@ func (c *client) GetClusterID(context.Context) uint64 {
 
 func (c *client) AllocID(ctx context.Context) (uint64, error) {
 	var resp *schedulerpb.AllocIDResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.AllocID(ctx, &schedulerpb.AllocIDRequest{
 			Header: c.requestHeader(),
@@ -395,12 +394,13 @@ func (c *client) AllocID(ctx context.Context) (uint64, error) {
 	return resp.GetId(), nil
 }
 
-func (c *client) Bootstrap(ctx context.Context, store *metapb.Store) (resp *schedulerpb.BootstrapResponse, err error) {
-	err = c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+func (c *client) Bootstrap(ctx context.Context, store *metapb.Store, firstRegion *metapb.Region) (resp *schedulerpb.BootstrapResponse, err error) {
+	err = c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.Bootstrap(ctx, &schedulerpb.BootstrapRequest{
 			Header: c.requestHeader(),
 			Store:  store,
+			Region: firstRegion,
 		})
 		return err1
 	})
@@ -409,7 +409,7 @@ func (c *client) Bootstrap(ctx context.Context, store *metapb.Store) (resp *sche
 
 func (c *client) IsBootstrapped(ctx context.Context) (bool, error) {
 	var resp *schedulerpb.IsBootstrappedResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.IsBootstrapped(ctx, &schedulerpb.IsBootstrappedRequest{Header: c.requestHeader()})
 		return err1
@@ -425,7 +425,7 @@ func (c *client) IsBootstrapped(ctx context.Context) (bool, error) {
 
 func (c *client) PutStore(ctx context.Context, store *metapb.Store) error {
 	var resp *schedulerpb.PutStoreResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.PutStore(ctx, &schedulerpb.PutStoreRequest{
 			Header: c.requestHeader(),
@@ -444,7 +444,7 @@ func (c *client) PutStore(ctx context.Context, store *metapb.Store) error {
 
 func (c *client) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, error) {
 	var resp *schedulerpb.GetStoreResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.GetStore(ctx, &schedulerpb.GetStoreRequest{
 			Header:  c.requestHeader(),
@@ -463,7 +463,7 @@ func (c *client) GetStore(ctx context.Context, storeID uint64) (*metapb.Store, e
 
 func (c *client) GetRegion(ctx context.Context, key []byte) (*metapb.Region, *metapb.Peer, error) {
 	var resp *schedulerpb.GetRegionResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.GetRegion(ctx, &schedulerpb.GetRegionRequest{
 			Header:    c.requestHeader(),
@@ -482,7 +482,7 @@ func (c *client) GetRegion(ctx context.Context, key []byte) (*metapb.Region, *me
 
 func (c *client) GetRegionByID(ctx context.Context, regionID uint64) (*metapb.Region, *metapb.Peer, error) {
 	var resp *schedulerpb.GetRegionResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.GetRegionByID(ctx, &schedulerpb.GetRegionByIDRequest{
 			Header:   c.requestHeader(),
@@ -500,7 +500,7 @@ func (c *client) GetRegionByID(ctx context.Context, regionID uint64) (*metapb.Re
 }
 
 func (c *client) AskSplit(ctx context.Context, region *metapb.Region) (resp *schedulerpb.AskSplitResponse, err error) {
-	err = c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err = c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.AskSplit(ctx, &schedulerpb.AskSplitRequest{
 			Header: c.requestHeader(),
@@ -519,7 +519,7 @@ func (c *client) AskSplit(ctx context.Context, region *metapb.Region) (resp *sch
 
 func (c *client) StoreHeartbeat(ctx context.Context, stats *schedulerpb.StoreStats) error {
 	var resp *schedulerpb.StoreHeartbeatResponse
-	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.SchedulerClient) error {
+	err := c.doRequest(ctx, func(ctx context.Context, client schedulerpb.PDClient) error {
 		var err1 error
 		resp, err1 = client.StoreHeartbeat(ctx, &schedulerpb.StoreHeartbeatRequest{
 			Header: c.requestHeader(),

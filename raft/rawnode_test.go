@@ -69,13 +69,13 @@ func TestRawNodeProposeAndConfChange3A(t *testing.T) {
 		entries = entries[l-2:]
 	}
 	if !bytes.Equal(entries[0].Data, []byte("somedata")) {
-		t.Errorf("entries[0].Data = %v, want %v", entries[0].Data, []byte("somedata"))
+		t.Fatalf("entries[0].Data = %v, want %v", entries[0].Data, []byte("somedata"))
 	}
 	if entries[1].EntryType != pb.EntryType_EntryConfChange {
 		t.Fatalf("type = %v, want %v", entries[1].EntryType, pb.EntryType_EntryConfChange)
 	}
 	if !bytes.Equal(entries[1].Data, ccdata) {
-		t.Errorf("data = %v, want %v", entries[1].Data, ccdata)
+		t.Fatalf("data = %v, want %v", entries[1].Data, ccdata)
 	}
 }
 
@@ -148,10 +148,10 @@ func TestRawNodeProposeAddDuplicateNode3A(t *testing.T) {
 		t.Fatalf("len(entries) = %d, want %d", len(entries), 3)
 	}
 	if !bytes.Equal(entries[0].Data, ccdata1) {
-		t.Errorf("entries[0].Data = %v, want %v", entries[0].Data, ccdata1)
+		t.Fatalf("entries[0].Data = %v, want %v", entries[0].Data, ccdata1)
 	}
 	if !bytes.Equal(entries[2].Data, ccdata2) {
-		t.Errorf("entries[2].Data = %v, want %v", entries[2].Data, ccdata2)
+		t.Fatalf("entries[2].Data = %v, want %v", entries[2].Data, ccdata2)
 	}
 }
 
@@ -171,16 +171,16 @@ func TestRawNodeStart2AC(t *testing.T) {
 	rawNode.Propose([]byte("foo"))
 	rd = rawNode.Ready()
 	if el := len(rd.Entries); el != len(rd.CommittedEntries) || el != 1 {
-		t.Errorf("got len(Entries): %+v, len(CommittedEntries): %+v, want %+v", el, len(rd.CommittedEntries), 1)
+		t.Fatalf("got len(Entries): %+v, len(CommittedEntries): %+v, want %+v", el, len(rd.CommittedEntries), 1)
 	}
 	if !reflect.DeepEqual(rd.Entries[0].Data, rd.CommittedEntries[0].Data) || !reflect.DeepEqual(rd.Entries[0].Data, []byte("foo")) {
-		t.Errorf("got %+v %+v , want %+v", rd.Entries[0].Data, rd.CommittedEntries[0].Data, []byte("foo"))
+		t.Fatalf("got %+v %+v , want %+v", rd.Entries[0].Data, rd.CommittedEntries[0].Data, []byte("foo"))
 	}
 	storage.Append(rd.Entries)
 	rawNode.Advance(rd)
 
 	if rawNode.HasReady() {
-		t.Errorf("unexpected Ready: %+v", rawNode.Ready())
+		t.Fatalf("unexpected Ready: %+v", rawNode.Ready())
 	}
 }
 
@@ -206,11 +206,11 @@ func TestRawNodeRestart2AC(t *testing.T) {
 	}
 	rd := rawNode.Ready()
 	if !reflect.DeepEqual(rd, want) {
-		t.Errorf("g = %+v,\n             w   %+v", rd, want)
+		t.Fatalf("g = %+v,\n             w   %+v", rd, want)
 	}
 	rawNode.Advance(rd)
 	if rawNode.HasReady() {
-		t.Errorf("unexpected Ready: %+v", rawNode.Ready())
+		t.Fatalf("unexpected Ready: %+v", rawNode.Ready())
 	}
 }
 
@@ -242,11 +242,11 @@ func TestRawNodeRestartFromSnapshot2C(t *testing.T) {
 		t.Fatal(err)
 	}
 	if rd := rawNode.Ready(); !reflect.DeepEqual(rd, want) {
-		t.Errorf("g = %+v,\n             w   %+v", rd, want)
+		t.Fatalf("g = %+v,\n             w   %+v", rd, want)
 	} else {
 		rawNode.Advance(rd)
 	}
 	if rawNode.HasReady() {
-		t.Errorf("unexpected Ready: %+v", rawNode.HasReady())
+		t.Fatalf("unexpected Ready: %+v", rawNode.HasReady())
 	}
 }

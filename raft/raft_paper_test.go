@@ -64,10 +64,10 @@ func testUpdateTermFromMessage(t *testing.T, state StateType) {
 	r.Step(pb.Message{MsgType: pb.MessageType_MsgAppend, Term: 2})
 
 	if r.Term != 2 {
-		t.Errorf("term = %d, want %d", r.Term, 2)
+		t.Fatalf("term = %d, want %d", r.Term, 2)
 	}
 	if r.State != StateFollower {
-		t.Errorf("state = %v, want %v", r.State, StateFollower)
+		t.Fatalf("state = %v, want %v", r.State, StateFollower)
 	}
 }
 
@@ -76,7 +76,7 @@ func testUpdateTermFromMessage(t *testing.T, state StateType) {
 func TestStartAsFollower2AA(t *testing.T) {
 	r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, NewMemoryStorage())
 	if r.State != StateFollower {
-		t.Errorf("state = %s, want %s", r.State, StateFollower)
+		t.Fatalf("state = %s, want %s", r.State, StateFollower)
 	}
 }
 
@@ -105,7 +105,7 @@ func TestLeaderBcastBeat2AA(t *testing.T) {
 		{From: 1, To: 3, Term: 1, MsgType: pb.MessageType_MsgHeartbeat},
 	}
 	if !reflect.DeepEqual(msgs, wmsgs) {
-		t.Errorf("msgs = %v, want %v", msgs, wmsgs)
+		t.Fatalf("msgs = %v, want %v", msgs, wmsgs)
 	}
 }
 
@@ -142,13 +142,13 @@ func testNonleaderStartElection(t *testing.T, state StateType) {
 	}
 
 	if r.Term != 2 {
-		t.Errorf("term = %d, want 2", r.Term)
+		t.Fatalf("term = %d, want 2", r.Term)
 	}
 	if r.State != StateCandidate {
-		t.Errorf("state = %s, want %s", r.State, StateCandidate)
+		t.Fatalf("state = %s, want %s", r.State, StateCandidate)
 	}
 	if !r.votes[r.id] {
-		t.Errorf("vote for self = false, want true")
+		t.Fatalf("vote for self = false, want true")
 	}
 	msgs := r.readMessages()
 	sort.Sort(messageSlice(msgs))
@@ -157,7 +157,7 @@ func testNonleaderStartElection(t *testing.T, state StateType) {
 		{From: 1, To: 3, Term: 2, MsgType: pb.MessageType_MsgRequestVote},
 	}
 	if !reflect.DeepEqual(msgs, wmsgs) {
-		t.Errorf("msgs = %v, want %v", msgs, wmsgs)
+		t.Fatalf("msgs = %v, want %v", msgs, wmsgs)
 	}
 }
 
@@ -196,10 +196,10 @@ func TestLeaderElectionInOneRoundRPC2AA(t *testing.T) {
 		}
 
 		if r.State != tt.state {
-			t.Errorf("#%d: state = %s, want %s", i, r.State, tt.state)
+			t.Fatalf("#%d: state = %s, want %s", i, r.State, tt.state)
 		}
 		if g := r.Term; g != 1 {
-			t.Errorf("#%d: term = %d, want %d", i, g, 1)
+			t.Fatalf("#%d: term = %d, want %d", i, g, 1)
 		}
 	}
 }
@@ -232,7 +232,7 @@ func TestFollowerVote2AA(t *testing.T) {
 			{From: 1, To: tt.nvote, Term: 1, MsgType: pb.MessageType_MsgRequestVoteResponse, Reject: tt.wreject},
 		}
 		if !reflect.DeepEqual(msgs, wmsgs) {
-			t.Errorf("#%d: msgs = %v, want %v", i, msgs, wmsgs)
+			t.Fatalf("#%d: msgs = %v, want %v", i, msgs, wmsgs)
 		}
 	}
 }
@@ -257,10 +257,10 @@ func TestCandidateFallback2AA(t *testing.T) {
 		r.Step(tt)
 
 		if g := r.State; g != StateFollower {
-			t.Errorf("#%d: state = %s, want %s", i, g, StateFollower)
+			t.Fatalf("#%d: state = %s, want %s", i, g, StateFollower)
 		}
 		if g := r.Term; g != tt.Term {
-			t.Errorf("#%d: term = %d, want %d", i, g, tt.Term)
+			t.Fatalf("#%d: term = %d, want %d", i, g, tt.Term)
 		}
 	}
 }
@@ -297,7 +297,7 @@ func testNonleaderElectionTimeoutRandomized(t *testing.T, state StateType) {
 
 	for d := et + 1; d < 2*et; d++ {
 		if !timeouts[d] {
-			t.Errorf("timeout in %d ticks should happen", d)
+			t.Fatalf("timeout in %d ticks should happen", d)
 		}
 	}
 }
@@ -348,7 +348,7 @@ func testNonleadersElectionTimeoutNonconflict(t *testing.T, state StateType) {
 	}
 
 	if g := float64(conflicts) / 1000; g > 0.3 {
-		t.Errorf("probability of conflicts = %v, want <= 0.3", g)
+		t.Fatalf("probability of conflicts = %v, want <= 0.3", g)
 	}
 }
 
@@ -372,10 +372,10 @@ func TestLeaderStartReplication2AB(t *testing.T) {
 	r.Step(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: ents})
 
 	if g := r.RaftLog.LastIndex(); g != li+1 {
-		t.Errorf("lastIndex = %d, want %d", g, li+1)
+		t.Fatalf("lastIndex = %d, want %d", g, li+1)
 	}
 	if g := r.RaftLog.committed; g != li {
-		t.Errorf("committed = %d, want %d", g, li)
+		t.Fatalf("committed = %d, want %d", g, li)
 	}
 	msgs := r.readMessages()
 	sort.Sort(messageSlice(msgs))
@@ -386,10 +386,10 @@ func TestLeaderStartReplication2AB(t *testing.T) {
 		{From: 1, To: 3, Term: 1, MsgType: pb.MessageType_MsgAppend, Index: li, LogTerm: 1, Entries: []*pb.Entry{&ent}, Commit: li},
 	}
 	if !reflect.DeepEqual(msgs, wmsgs) {
-		t.Errorf("msgs = %+v, want %+v", msgs, wmsgs)
+		t.Fatalf("msgs = %+v, want %+v", msgs, wmsgs)
 	}
 	if g := r.RaftLog.unstableEntries(); !reflect.DeepEqual(g, wents) {
-		t.Errorf("ents = %+v, want %+v", g, wents)
+		t.Fatalf("ents = %+v, want %+v", g, wents)
 	}
 }
 
@@ -414,23 +414,23 @@ func TestLeaderCommitEntry2AB(t *testing.T) {
 	}
 
 	if g := r.RaftLog.committed; g != li+1 {
-		t.Errorf("committed = %d, want %d", g, li+1)
+		t.Fatalf("committed = %d, want %d", g, li+1)
 	}
 	wents := []pb.Entry{{Index: li + 1, Term: 1, Data: []byte("some data")}}
 	if g := r.RaftLog.nextEnts(); !reflect.DeepEqual(g, wents) {
-		t.Errorf("nextEnts = %+v, want %+v", g, wents)
+		t.Fatalf("nextEnts = %+v, want %+v", g, wents)
 	}
 	msgs := r.readMessages()
 	sort.Sort(messageSlice(msgs))
 	for i, m := range msgs {
 		if w := uint64(i + 2); m.To != w {
-			t.Errorf("to = %d, want %d", m.To, w)
+			t.Fatalf("to = %d, want %d", m.To, w)
 		}
 		if m.MsgType != pb.MessageType_MsgAppend {
-			t.Errorf("type = %v, want %v", m.MsgType, pb.MessageType_MsgAppend)
+			t.Fatalf("type = %v, want %v", m.MsgType, pb.MessageType_MsgAppend)
 		}
 		if m.Commit != li+1 {
-			t.Errorf("commit = %d, want %d", m.Commit, li+1)
+			t.Fatalf("commit = %d, want %d", m.Commit, li+1)
 		}
 	}
 }
@@ -470,7 +470,7 @@ func TestLeaderAcknowledgeCommit2AB(t *testing.T) {
 		}
 
 		if g := r.RaftLog.committed > li; g != tt.wack {
-			t.Errorf("#%d: ack commit = %v, want %v", i, g, tt.wack)
+			t.Fatalf("#%d: ack commit = %v, want %v", i, g, tt.wack)
 		}
 	}
 }
@@ -503,7 +503,7 @@ func TestLeaderCommitPrecedingEntries2AB(t *testing.T) {
 		li := uint64(len(tt))
 		wents := append(tt, pb.Entry{Term: 3, Index: li + 1}, pb.Entry{Term: 3, Index: li + 2, Data: []byte("some data")})
 		if g := r.RaftLog.nextEnts(); !reflect.DeepEqual(g, wents) {
-			t.Errorf("#%d: ents = %+v, want %+v", i, g, wents)
+			t.Fatalf("#%d: ents = %+v, want %+v", i, g, wents)
 		}
 	}
 }
@@ -551,14 +551,14 @@ func TestFollowerCommitEntry2AB(t *testing.T) {
 		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: 1, Entries: tt.ents, Commit: tt.commit})
 
 		if g := r.RaftLog.committed; g != tt.commit {
-			t.Errorf("#%d: committed = %d, want %d", i, g, tt.commit)
+			t.Fatalf("#%d: committed = %d, want %d", i, g, tt.commit)
 		}
 		wents := make([]pb.Entry, 0, tt.commit)
 		for _, ent := range tt.ents[:int(tt.commit)] {
 			wents = append(wents, *ent)
 		}
 		if g := r.RaftLog.nextEnts(); !reflect.DeepEqual(g, wents) {
-			t.Errorf("#%d: nextEnts = %v, want %v", i, g, wents)
+			t.Fatalf("#%d: nextEnts = %v, want %v", i, g, wents)
 		}
 	}
 }
@@ -598,13 +598,13 @@ func TestFollowerCheckMessageType_MsgAppend2AB(t *testing.T) {
 
 		msgs = r.readMessages()
 		if len(msgs) != 1 {
-			t.Errorf("#%d: len(msgs) = %+v, want %+v", i, len(msgs), 1)
+			t.Fatalf("#%d: len(msgs) = %+v, want %+v", i, len(msgs), 1)
 		}
 		if msgs[0].Term != 2 {
-			t.Errorf("#%d: term = %+v, want %+v", i, msgs[0].Term, 2)
+			t.Fatalf("#%d: term = %+v, want %+v", i, msgs[0].Term, 2)
 		}
 		if msgs[0].Reject != tt.wreject {
-			t.Errorf("#%d: reject = %+v, want %+v", i, msgs[0].Reject, tt.wreject)
+			t.Fatalf("#%d: term = %+v, want %+v", i, msgs[0].Reject, tt.wreject)
 		}
 	}
 }
@@ -652,24 +652,22 @@ func TestFollowerAppendEntries2AB(t *testing.T) {
 		r := newTestRaft(1, []uint64{1, 2, 3}, 10, 1, storage)
 		r.becomeFollower(2, 2)
 
+		t.Log(tt.ents)
 		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppend, Term: 2, LogTerm: tt.term, Index: tt.index, Entries: tt.ents})
 
 		wents := make([]pb.Entry, 0, len(tt.wents))
 		for _, ent := range tt.wents {
 			wents = append(wents, *ent)
 		}
-		if g := r.RaftLog.entries; !reflect.DeepEqual(g, wents) {
-			t.Errorf("#%d: ents = %+v, want %+v", i, g, wents)
+		if g := r.RaftLog.allEntries(); !reflect.DeepEqual(g, wents) {
+			t.Fatalf("#%d: ents = %+v, want %+v", i, g, wents)
 		}
-		var wunstable []pb.Entry
-		if tt.wunstable != nil {
-			wunstable = make([]pb.Entry, 0, len(tt.wunstable))
-		}
+		wunstable := make([]pb.Entry, 0, len(tt.wunstable))
 		for _, ent := range tt.wunstable {
 			wunstable = append(wunstable, *ent)
 		}
 		if g := r.RaftLog.unstableEntries(); !reflect.DeepEqual(g, wunstable) {
-			t.Errorf("#%d: unstableEnts = %+v, want %+v", i, g, wunstable)
+			t.Fatalf("#%d: unstableEnts = %+v, want %+v", i, g, wunstable)
 		}
 	}
 }
@@ -748,7 +746,7 @@ func TestLeaderSyncFollowerLog2AB(t *testing.T) {
 		n.send(pb.Message{From: 1, To: 1, MsgType: pb.MessageType_MsgPropose, Entries: []*pb.Entry{{}}})
 
 		if g := diffu(ltoa(lead.RaftLog), ltoa(follower.RaftLog)); g != "" {
-			t.Errorf("#%d: log diff:\n%s", i, g)
+			t.Fatalf("#%d: log diff:\n%s", i, g)
 		}
 	}
 }
@@ -782,20 +780,20 @@ func TestVoteRequest2AB(t *testing.T) {
 		}
 		for i, m := range msgs {
 			if m.MsgType != pb.MessageType_MsgRequestVote {
-				t.Errorf("#%d: msgType = %d, want %d", i, m.MsgType, pb.MessageType_MsgRequestVote)
+				t.Fatalf("#%d: msgType = %d, want %d", i, m.MsgType, pb.MessageType_MsgRequestVote)
 			}
 			if m.To != uint64(i+2) {
-				t.Errorf("#%d: to = %d, want %d", i, m.To, i+2)
+				t.Fatalf("#%d: to = %d, want %d", i, m.To, i+2)
 			}
 			if m.Term != tt.wterm {
-				t.Errorf("#%d: term = %d, want %d", i, m.Term, tt.wterm)
+				t.Fatalf("#%d: term = %d, want %d", i, m.Term, tt.wterm)
 			}
 			windex, wlogterm := tt.ents[len(tt.ents)-1].Index, tt.ents[len(tt.ents)-1].Term
 			if m.Index != windex {
-				t.Errorf("#%d: index = %d, want %d", i, m.Index, windex)
+				t.Fatalf("#%d: index = %d, want %d", i, m.Index, windex)
 			}
 			if m.LogTerm != wlogterm {
-				t.Errorf("#%d: logterm = %d, want %d", i, m.LogTerm, wlogterm)
+				t.Fatalf("#%d: logterm = %d, want %d", i, m.LogTerm, wlogterm)
 			}
 		}
 	}
@@ -838,10 +836,10 @@ func TestVoter2AA(t *testing.T) {
 		}
 		m := msgs[0]
 		if m.MsgType != pb.MessageType_MsgRequestVoteResponse {
-			t.Errorf("#%d: msgType = %d, want %d", i, m.MsgType, pb.MessageType_MsgRequestVoteResponse)
+			t.Fatalf("#%d: msgType = %d, want %d", i, m.MsgType, pb.MessageType_MsgRequestVoteResponse)
 		}
 		if m.Reject != tt.wreject {
-			t.Errorf("#%d: reject = %t, want %t", i, m.Reject, tt.wreject)
+			t.Fatalf("#%d: reject = %t, want %t", i, m.Reject, tt.wreject)
 		}
 	}
 }
@@ -875,7 +873,7 @@ func TestLeaderOnlyCommitsLogFromCurrentTerm2AB(t *testing.T) {
 
 		r.Step(pb.Message{From: 2, To: 1, MsgType: pb.MessageType_MsgAppendResponse, Term: r.Term, Index: tt.index})
 		if r.RaftLog.committed != tt.wcommit {
-			t.Errorf("#%d: commit = %d, want %d", i, r.RaftLog.committed, tt.wcommit)
+			t.Fatalf("#%d: commit = %d, want %d", i, r.RaftLog.committed, tt.wcommit)
 		}
 	}
 }
@@ -890,6 +888,8 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	if r.State != StateLeader {
 		panic("it should only be used when it is the leader")
 	}
+	s.Append(r.RaftLog.unstableEntries())
+	r.RaftLog.tryStableTo(r.RaftLog.LastTerm(), r.RaftLog.LastIndex())
 	for id := range r.Prs {
 		if id == r.id {
 			continue
@@ -907,9 +907,9 @@ func commitNoopEntry(r *Raft, s *MemoryStorage) {
 	}
 	// ignore further messages to refresh followers' commit index
 	r.readMessages()
-	s.Append(r.RaftLog.unstableEntries())
-	r.RaftLog.applied = r.RaftLog.committed
-	r.RaftLog.stabled = r.RaftLog.LastIndex()
+	if r.RaftLog.applied < r.RaftLog.committed {
+		r.RaftLog.appliedTo(r.RaftLog.committed)
+	}
 }
 
 func acceptAndReply(m pb.Message) pb.Message {

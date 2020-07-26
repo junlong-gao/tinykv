@@ -13,8 +13,8 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
+	schedulerpb "github.com/pingcap-incubator/tinykv/proto/pkg/pdpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_serverpb"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
 	"github.com/pingcap/errors"
 )
 
@@ -162,7 +162,7 @@ func (n *Node) BootstrapCluster(ctx context.Context, engines *engine_util.Engine
 			time.Sleep(time.Second)
 		}
 
-		res, err := n.schedulerClient.Bootstrap(ctx, n.store)
+		res, err := n.schedulerClient.Bootstrap(ctx, n.store, firstRegion)
 		if err != nil {
 			log.Errorf("bootstrap cluster failed, clusterID: %d, err: %v", n.clusterID, err)
 			continue

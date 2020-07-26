@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/pingcap-incubator/tinykv/log"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -16,9 +17,12 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/raftstore"
 	"github.com/pingcap-incubator/tinykv/kv/storage/raft_storage"
 	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
-	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
+)
+
+const (
+	TIMEOUT_SECONDS = 600
 )
 
 type Simulator interface {
@@ -114,7 +118,7 @@ func (c *Cluster) Start() {
 		Id:      1,
 		Address: "",
 	}
-	resp, err := c.schedulerClient.Bootstrap(context.TODO(), store)
+	resp, err := c.schedulerClient.Bootstrap(context.TODO(), store, firstRegion)
 	if err != nil {
 		panic(err)
 	}
@@ -195,9 +199,13 @@ func (c *Cluster) Request(key []byte, reqs []*raft_cmdpb.Request, timeout time.D
 			SleepMS(100)
 			continue
 		}
+		took := time.Since(startTime)
+		if took > 200*time.Millisecond {
+			log.Errorf("Took %v do request %v", took, reqs)
+		}
 		return resp, txn
 	}
-	panic("request timeout")
+	panic(fmt.Sprintf("request timeout %v %v", key, reqs))
 }
 
 func (c *Cluster) CallCommand(request *raft_cmdpb.RaftCmdRequest, timeout time.Duration) (*raft_cmdpb.RaftCmdResponse, *badger.Txn) {
@@ -238,6 +246,31 @@ func (c *Cluster) CallCommandOnLeader(request *raft_cmdpb.RaftCmdRequest, timeou
 		if resp.Header.Error != nil {
 			err := resp.Header.Error
 			if err.GetStaleCommand() != nil || err.GetEpochNotMatch() != nil || err.GetNotLeader() != nil {
+				if err.GetEpochNotMatch() != nil {
+
+					found := false
+					log.Debugf("request %v get error of epoch mismatch %v", request, err.GetEpochNotMatch())
+					for _, r := range err.GetEpochNotMatch().CurrentRegions {
+						if r.Id != request.Header.RegionId {
+							continue
+						}
+
+						found = true
+						if request.Header.RegionEpoch.ConfVer >= r.RegionEpoch.ConfVer && request.Header.RegionEpoch.Version >= r.RegionEpoch.Version {
+							// this is retryable
+							break
+						} else {
+							return resp, nil
+						}
+					}
+
+					if found {
+						// retrying...
+					} else {
+						log.Panicf("%v, %v", request, err.GetEpochNotMatch().CurrentRegions)
+					}
+				}
+
 				log.Debugf("encouter retryable err %+v", resp)
 				if err.GetNotLeader() != nil && err.GetNotLeader().Leader != nil {
 					leader = err.GetNotLeader().Leader
@@ -263,7 +296,7 @@ func (c *Cluster) LeaderOfRegion(regionID uint64) *metapb.Peer {
 }
 
 func (c *Cluster) GetRegion(key []byte) *metapb.Region {
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 1000; i++ {
 		region, _, _ := c.schedulerClient.GetRegion(context.TODO(), key)
 		if region != nil {
 			return region
@@ -298,7 +331,7 @@ func (c *Cluster) MustPut(key, value []byte) {
 
 func (c *Cluster) MustPutCF(cf string, key, value []byte) {
 	req := NewPutCfCmd(cf, key, value)
-	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
+	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, TIMEOUT_SECONDS*time.Second)
 	if resp.Header.Error != nil {
 		panic(resp.Header.Error)
 	}
@@ -323,7 +356,7 @@ func (c *Cluster) Get(key []byte) []byte {
 
 func (c *Cluster) GetCF(cf string, key []byte) []byte {
 	req := NewGetCfCmd(cf, key)
-	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
+	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, TIMEOUT_SECONDS*time.Second)
 	if resp.Header.Error != nil {
 		panic(resp.Header.Error)
 	}
@@ -342,7 +375,7 @@ func (c *Cluster) MustDelete(key []byte) {
 
 func (c *Cluster) MustDeleteCF(cf string, key []byte) {
 	req := NewDeleteCfCmd(cf, key)
-	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
+	resp, _ := c.Request(key, []*raft_cmdpb.Request{req}, TIMEOUT_SECONDS*time.Second)
 	if resp.Header.Error != nil {
 		panic(resp.Header.Error)
 	}
@@ -359,7 +392,7 @@ func (c *Cluster) Scan(start, end []byte) [][]byte {
 	values := make([][]byte, 0)
 	key := start
 	for (len(end) != 0 && bytes.Compare(key, end) < 0) || (len(key) == 0 && len(end) == 0) {
-		resp, txn := c.Request(key, []*raft_cmdpb.Request{req}, 5*time.Second)
+		resp, txn := c.Request(key, []*raft_cmdpb.Request{req}, TIMEOUT_SECONDS*time.Second)
 		if resp.Header.Error != nil {
 			panic(resp.Header.Error)
 		}

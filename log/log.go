@@ -49,6 +49,7 @@ const (
 
 const FORMAT_TIME_DAY string = "20060102"
 const FORMAT_TIME_HOUR string = "2006010215"
+const CALLDEPTH = 4 // magic = =
 
 var _log *Logger = New()
 
@@ -178,7 +179,7 @@ func (l *Logger) logf(t LogType, format string, v ...interface{}) {
 	} else {
 		s = "[" + logStr + "] " + fmt.Sprintf(format, v...)
 	}
-	l._log.Output(4, s)
+	l._log.Output(CALLDEPTH, s)
 }
 
 func (l *Logger) Fatal(v ...interface{}) {

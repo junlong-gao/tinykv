@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"sync"
+	"fmt"
 
 	"github.com/google/btree"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/util"
@@ -11,7 +12,7 @@ import (
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
+	schedulerpb "github.com/pingcap-incubator/tinykv/proto/pkg/pdpb"
 	"github.com/pingcap/errors"
 )
 
@@ -80,6 +81,7 @@ type MockSchedulerClient struct {
 	stores       map[uint64]*Store
 	regionsRange *btree.BTree      // key -> region
 	regionsKey   map[uint64][]byte // regionID -> startKey
+	regionTerm   map[uint64]uint64 // regionID -> max term of the leadership
 
 	baseID uint64
 
@@ -99,6 +101,7 @@ func NewMockSchedulerClient(clusterID uint64, baseID uint64) *MockSchedulerClien
 		stores:       make(map[uint64]*Store),
 		regionsRange: btree.New(2),
 		regionsKey:   make(map[uint64][]byte),
+		regionTerm:   make(map[uint64]uint64),
 		baseID:       baseID,
 		operators:    make(map[uint64]*Operator),
 		leaders:      make(map[uint64]*metapb.Peer),
@@ -121,7 +124,7 @@ func (m *MockSchedulerClient) AllocID(ctx context.Context) (uint64, error) {
 	return ret, nil
 }
 
-func (m *MockSchedulerClient) Bootstrap(ctx context.Context, store *metapb.Store) (*schedulerpb.BootstrapResponse, error) {
+func (m *MockSchedulerClient) Bootstrap(ctx context.Context, store *metapb.Store, firstRegion *metapb.Region) (*schedulerpb.BootstrapResponse, error) {
 	m.Lock()
 	defer m.Unlock()
 
@@ -256,6 +259,10 @@ func (m *MockSchedulerClient) RegionHeartbeat(req *schedulerpb.RegionHeartbeatRe
 	defer m.Unlock()
 
 	regionID := req.Region.GetId()
+	if req.Term < m.regionTerm[regionID] {
+		return nil
+	}
+
 	for _, p := range req.Region.GetPeers() {
 		delete(m.pendingPeers, p.GetId())
 	}
@@ -263,6 +270,7 @@ func (m *MockSchedulerClient) RegionHeartbeat(req *schedulerpb.RegionHeartbeatRe
 		m.pendingPeers[p.GetId()] = p
 	}
 	m.leaders[regionID] = req.Leader
+	m.regionTerm[regionID] = req.Term
 
 	if err := m.handleHeartbeatVersion(req.Region); err != nil {
 		return err
@@ -347,10 +355,10 @@ func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) 
 		// only one different peer.
 		if searchRegionPeerLen > regionPeerLen {
 			if searchRegionPeerLen-regionPeerLen != 1 {
-				panic("should only one conf change")
+				panic("should only one conf change " + fmt.Sprintf("%v, %v", searchRegion, region))
 			}
 			if len(GetDiffPeers(searchRegion, region)) != 1 {
-				panic("should only one different peer")
+				panic(fmt.Sprintf("should only one different peer %v->%v", searchRegion, region))
 			}
 			if len(GetDiffPeers(region, searchRegion)) != 0 {
 				panic("should include all peers")
@@ -360,7 +368,7 @@ func (m *MockSchedulerClient) handleHeartbeatConfVersion(region *metapb.Region) 
 				panic("should only one conf change")
 			}
 			if len(GetDiffPeers(region, searchRegion)) != 1 {
-				panic("should only one different peer")
+				panic(fmt.Sprintf("should only one different peer %v->%v, diff = %v", searchRegion, region, GetDiffPeers(region, searchRegion)))
 			}
 			if len(GetDiffPeers(searchRegion, region)) != 0 {
 				panic("should include all peers")
@@ -473,6 +481,7 @@ func (m *MockSchedulerClient) findRegion(key []byte) *regionItem {
 
 func (m *MockSchedulerClient) addRegionLocked(region *metapb.Region) {
 	m.regionsKey[region.GetId()] = region.GetStartKey()
+	//log.Infof("Adding region %v", region)
 	m.regionsRange.ReplaceOrInsert(&regionItem{region: *region})
 }
 
@@ -538,7 +547,7 @@ func MustSamePeers(left *metapb.Region, right *metapb.Region) {
 	}
 	for _, p := range left.GetPeers() {
 		if FindPeer(right, p.GetStoreId()) == nil {
-			panic("not found the peer")
+			log.Infof("not found the peer l:%v vs r:%v", left, right)
 		}
 	}
 }

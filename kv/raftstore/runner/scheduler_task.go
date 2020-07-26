@@ -9,8 +9,8 @@ import (
 	"github.com/pingcap-incubator/tinykv/kv/util/worker"
 	"github.com/pingcap-incubator/tinykv/log"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/metapb"
+	schedulerpb "github.com/pingcap-incubator/tinykv/proto/pkg/pdpb"
 	"github.com/pingcap-incubator/tinykv/proto/pkg/raft_cmdpb"
-	"github.com/pingcap-incubator/tinykv/proto/pkg/schedulerpb"
 	"github.com/shirou/gopsutil/disk"
 )
 
@@ -26,6 +26,7 @@ type SchedulerRegionHeartbeatTask struct {
 	Peer            *metapb.Peer
 	PendingPeers    []*metapb.Peer
 	ApproximateSize *uint64
+	Term            uint64
 }
 
 type SchedulerStoreHeartbeatTask struct {
@@ -113,6 +114,7 @@ func (r *SchedulerTaskHandler) onHeartbeat(t *SchedulerRegionHeartbeatTask) {
 		Leader:          t.Peer,
 		PendingPeers:    t.PendingPeers,
 		ApproximateSize: uint64(size),
+		Term:            t.Term,
 	}
 	r.SchedulerClient.RegionHeartbeat(req)
 }

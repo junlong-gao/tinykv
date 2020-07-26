@@ -4,6 +4,11 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pingcap-incubator/tinykv/kv/raftstore/meta"
+	pb "github.com/pingcap-incubator/tinykv/proto/pkg/eraftpb"
+
+	"github.com/pingcap-incubator/tinykv/kv/util/engine_util"
+
 	"github.com/Connor1996/badger/y"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/message"
 	"github.com/pingcap-incubator/tinykv/kv/raftstore/runner"
@@ -38,11 +43,493 @@ func newPeerMsgHandler(peer *peer, ctx *GlobalContext) *peerMsgHandler {
 	}
 }
 
+type outStandingReq struct {
+	req *raft_cmdpb.RaftCmdRequest
+	p   *raft_cmdpb.RaftCmdResponse
+}
+
+// On updating region when there is split/config change:
+// Unfortunately there is a race condition between mutation of the region here
+// and sending region heart beat to the scheduler. This is by no means production ready code
+// but let's just use copy and pointer swap to hope no bad thing can happen.
+func (d *peerMsgHandler) processCmd(
+	cb *message.Callback, m *pb.Entry, kvWB *engine_util.WriteBatch,
+	p *raft_cmdpb.RaftCmdResponse,
+	applied uint64) (req *raft_cmdpb.RaftCmdRequest, destroyed bool) {
+	destroyed = false
+
+	if m.EntryType == pb.EntryType_EntryConfChange {
+		var cc pb.ConfChange
+		err := cc.Unmarshal(m.Data)
+		if err != nil {
+			panic(err)
+		}
+
+		var ctx raft_cmdpb.RaftCmdRequest
+		err = ctx.Unmarshal(cc.Context)
+		if err != nil {
+			panic(err)
+		}
+		err = util.CheckRegionEpoch(&ctx, d.Region(), true)
+		if err != nil {
+			return
+		}
+
+		var updatedRegion metapb.Region
+		err = util.CloneMsg(d.Region(), &updatedRegion)
+		if err != nil {
+			panic(err)
+		}
+
+		if cc.ChangeType == pb.ConfChangeType_AddNode {
+			log.Infof("%v adding node (req:%v) %v to region %v (index %v,%v)", d.Tag, ctx.Header.RegionEpoch, cc.NodeId, d.Region(), m.Index, m.Term)
+			updatedRegion.RegionEpoch.ConfVer++
+			newPeer := &metapb.Peer{
+				Id:      cc.NodeId,
+				StoreId: ctx.AdminRequest.ChangePeer.Peer.StoreId,
+			}
+			updatedRegion.Peers = append(updatedRegion.Peers, newPeer)
+
+			d.SetRegion(&updatedRegion)
+			d.ctx.storeMeta.regions[d.regionId] = &updatedRegion
+			d.peer.insertPeerCache(newPeer)
+
+			d.RaftGroup.ApplyConfChange(cc)
+			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+			return
+		} else {
+			log.Infof("%v removing node (req:%v) %v from region %v (index %v,%v)", d.Tag, ctx.Header.RegionEpoch, cc.NodeId, d.Region(), m.Index, m.Term)
+			idx := -1
+			for i, p := range updatedRegion.Peers {
+				if p.Id == cc.NodeId {
+					idx = i
+					break
+				}
+			}
+			if idx < 0 {
+				log.Panicf("%v:%v, looking for %v", d.Tag, updatedRegion, cc.NodeId)
+			}
+
+			updatedRegion.RegionEpoch.ConfVer++
+			updatedRegion.Peers = append(updatedRegion.Peers[0:idx], d.Region().Peers[idx+1:]...)
+
+			d.SetRegion(&updatedRegion)
+			d.ctx.storeMeta.regions[d.regionId] = &updatedRegion
+			d.peer.removePeerCache(cc.NodeId)
+
+			d.RaftGroup.ApplyConfChange(cc)
+			if cc.NodeId == d.PeerId() {
+				log.Infof("Destroying node %v", cc.NodeId)
+				destroyed = true
+			} else {
+				meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+			}
+			return
+		}
+	}
+
+	// normal entry:
+	if len(m.Data) == 0 {
+		return
+	}
+
+	var r raft_cmdpb.RaftCmdRequest
+	err := r.Unmarshal(m.Data)
+	if err != nil {
+		log.Panicf("%v(%v):%v", m.Data, m.EntryType, err)
+	}
+
+	req = &r
+
+	regionErr := util.CheckRegionEpoch(&r, d.Region(), true)
+	if regionErr != nil {
+		if p != nil {
+			BindRespError(p, regionErr)
+		}
+		return
+	}
+
+	if r.AdminRequest != nil {
+		if len(r.Requests) > 0 {
+			panic(r)
+		}
+		switch r.AdminRequest.CmdType {
+		case raft_cmdpb.AdminCmdType_CompactLog:
+			// This is done async. Updating truncate state does not need to wait on actual gc to complete.
+			compactIdx := r.AdminRequest.CompactLog.CompactIndex
+			compactTerm := r.AdminRequest.CompactLog.CompactTerm
+
+			if compactIdx > applied {
+				// Leader uses its applied index to coordinate cluster wide log compaction, but this
+				// follower can be lagging behind. Adjust use its own compactIdx
+				compactIdx = applied
+				term, err := d.peer.RaftGroup.Raft.RaftLog.Term(compactIdx)
+				if err != nil {
+					panic(err)
+				}
+				compactTerm = term
+			}
+
+			if d.peerStorage.applyState.TruncatedState.Index > compactIdx {
+				//// ignore
+			} else {
+				d.ScheduleCompactLog(compactIdx)
+				d.peerStorage.applyState.TruncatedState = &rspb.RaftTruncatedState{
+					Index: compactIdx,
+					Term:  compactTerm,
+				}
+
+				if compactIdx > applied {
+					log.Panicf("Node %v %v > %v", d.PeerId(), compactIdx, applied)
+				}
+
+				// there is no response gc callback.
+			}
+		case raft_cmdpb.AdminCmdType_Split:
+			splitReq := r.AdminRequest.Split
+
+			var updatedRegion metapb.Region
+			err = util.CloneMsg(d.Region(), &updatedRegion)
+			if err != nil {
+				panic(err)
+			}
+
+			log.Warningf("%v splitting on %v (%v) (%v, %v), current %v", d.Tag, splitReq, r.Header.RegionEpoch, m.Index, m.Term, updatedRegion)
+
+			if len(splitReq.NewPeerIds) != len(updatedRegion.Peers) {
+				log.Panicf("peer mismatch %v (%v), %v", splitReq, r.Header.RegionEpoch, updatedRegion)
+			}
+
+			err := util.CheckKeyInRegion(splitReq.SplitKey, &updatedRegion)
+			if err != nil {
+				log.Errorf("%v got wrong split %v, %v", d.Tag, splitReq, err)
+				if p != nil {
+					BindRespError(p, err)
+				}
+				return
+			}
+
+			if p != nil {
+				p.AdminResponse = &raft_cmdpb.AdminResponse{CmdType: raft_cmdpb.AdminCmdType_Split}
+			}
+
+			curEndKey := updatedRegion.EndKey
+			updatedRegion.EndKey = splitReq.SplitKey
+			updatedRegion.RegionEpoch.Version++
+
+			newRegion := &metapb.Region{
+				Id: splitReq.NewRegionId,
+				Peers: func() []*metapb.Peer {
+					var ret []*metapb.Peer
+					for idx, p := range updatedRegion.Peers {
+						ret = append(ret, &metapb.Peer{
+							Id:      splitReq.NewPeerIds[idx],
+							StoreId: p.StoreId,
+						})
+					}
+					return ret
+				}(),
+				StartKey: splitReq.SplitKey,
+				EndKey:   curEndKey,
+				RegionEpoch: func() *metapb.RegionEpoch {
+					var ret metapb.RegionEpoch
+					ret.ConfVer = updatedRegion.RegionEpoch.ConfVer
+					ret.Version = updatedRegion.RegionEpoch.Version
+					return &ret
+				}(),
+			}
+
+			overlap := d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{&updatedRegion})
+			if overlap == nil {
+				panic(d.ctx.storeMeta.regionRanges)
+			}
+			d.SetRegion(&updatedRegion)
+			d.ctx.storeMeta.regions[d.regionId] = &updatedRegion
+
+			log.Warningf("%v (%v) splitting %v %v -> %v at (index %v, term %v) to region %v",
+				d.Tag, d.Region().RegionEpoch, d.Region().StartKey,
+				curEndKey, d.Region().EndKey, m.Index, m.Term, splitReq)
+
+			meta.WriteRegionState(kvWB, newRegion, rspb.PeerState_Normal)
+			meta.WriteRegionState(kvWB, d.Region(), rspb.PeerState_Normal)
+
+			if len(updatedRegion.Peers) == 0 {
+				panic(updatedRegion)
+			}
+
+			d.ctx.storeMeta.regions[newRegion.Id] = newRegion
+			overlap = d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{newRegion})
+			if overlap != nil {
+				panic(d.ctx.storeMeta.regionRanges)
+			}
+
+			peer, err := createPeer(d.ctx.store.Id, d.ctx.cfg, d.ctx.regionTaskSender, d.ctx.engine, newRegion)
+
+			d.ctx.router.register(peer)
+			if err != nil {
+				panic(err)
+			}
+
+			err = d.ctx.router.send(newRegion.Id, message.Msg{RegionID: newRegion.Id, Type: message.MsgTypeStart})
+			if err != nil {
+				panic(err)
+			}
+
+			if p != nil {
+				p.AdminResponse.Split = &raft_cmdpb.SplitResponse{
+					Regions: []*metapb.Region{newRegion, &updatedRegion},
+				}
+			}
+
+		default:
+			panic("impossible")
+		}
+		return
+	}
+
+	for _, cmd := range r.Requests {
+		switch cmd.CmdType {
+		case raft_cmdpb.CmdType_Snap:
+			if cb == nil {
+				continue
+			}
+			p.Responses = append(p.Responses, &raft_cmdpb.Response{})
+
+		case raft_cmdpb.CmdType_Get:
+			if cb == nil {
+				continue
+			}
+
+			err := util.CheckKeyInRegion(cmd.Get.Key, d.Region())
+			if err != nil {
+				log.Errorf("%v, %v:%v", m.Index, m.Term, err)
+				BindRespError(p, err)
+			} else {
+				p.Responses = append(p.Responses, &raft_cmdpb.Response{})
+			}
+
+		case raft_cmdpb.CmdType_Put:
+			err := util.CheckKeyInRegion(cmd.Put.Key, d.Region())
+			if err != nil {
+				if cb == nil {
+					continue
+				}
+				log.Errorf("%v, %v:%v", m.Index, m.Term, err)
+				BindRespError(p, err)
+			} else {
+				kvWB.SetCF(cmd.Put.Cf, cmd.Put.Key, cmd.Put.Value)
+				if cb == nil {
+					continue
+				}
+				p.Responses = append(p.Responses, &raft_cmdpb.Response{CmdType: cmd.CmdType})
+			}
+
+		case raft_cmdpb.CmdType_Delete:
+			err := util.CheckKeyInRegion(cmd.Delete.Key, d.Region())
+			if err != nil {
+				if cb == nil {
+					continue
+				}
+				log.Errorf("%v error in deleting key:%v (%v,%v):%v", d.Tag, cmd.Delete.Key, m.Index, m.Term, err)
+				BindRespError(p, err)
+			} else {
+				kvWB.DeleteCF(cmd.Delete.Cf, cmd.Delete.Key)
+				if cb == nil {
+					continue
+				}
+				p.Responses = append(p.Responses, &raft_cmdpb.Response{CmdType: cmd.CmdType})
+			}
+
+		default:
+			panic("unhandled message")
+		}
+	}
+
+	return
+}
+
 func (d *peerMsgHandler) HandleRaftReady() {
 	if d.stopped {
 		return
 	}
 	// Your Code Here (2B).
+	if !d.peer.RaftGroup.HasReady() {
+		return
+	}
+
+	startTime := time.Now()
+	rd := d.peer.RaftGroup.Ready()
+	// save state, this includes the hard state and flush logs to stable storage
+	snapshotRet, err := d.peer.peerStorage.SaveReadyState(&rd)
+	if err != nil {
+		panic(err)
+	}
+
+	kvWB := engine_util.WriteBatch{}
+	if snapshotRet != nil {
+		// if this node is just joining a group with a snapshot from leader, also restore
+		// the region state including version/conf numbering
+		d.SetRegion(snapshotRet.Region)
+
+		// update the region info in memory from the snapshot
+		d.ctx.storeMeta.regions[d.regionId] = d.Region()
+		d.ctx.storeMeta.regionRanges.ReplaceOrInsert(&regionItem{region: d.Region()})
+
+		d.peer.peerCache = map[uint64]*metapb.Peer{}
+		for _, p := range d.Region().Peers {
+			d.insertPeerCache(p)
+		}
+	}
+
+	// The peer can be just started after restoring snapshot, or just started but without any
+	// need of snapshot, in case system reuses peer id (which it really should not be doing).
+	// Persist the region info and set it as normal here.
+	if d.RaftGroup.Raft.IsMember(d.PeerId()) {
+		meta.WriteRegionState(&kvWB, d.Region(), rspb.PeerState_Normal)
+	}
+
+	applied := d.peerStorage.applyState.AppliedIndex
+	// send messages here:
+	for _, m := range rd.Messages {
+		err := d.peer.sendRaftMessage(m, d.ctx.trans)
+		if err != nil {
+			log.Debugf("%v failed sending message (%v, %v) to %v got err:%v",
+				d.Tag, m.Index, m.Term, m.To, err)
+			// continue
+		}
+	}
+
+	// apply the committed entries to the state machine
+	pending := make(map[*message.Callback]outStandingReq)
+
+	destroyed := false
+	for _, m := range rd.CommittedEntries {
+		if m.Index <= d.peerStorage.applyState.AppliedIndex {
+			continue
+		}
+
+		proposal, ok := d.proposals[m.Index]
+		delete(d.proposals, m.Index)
+
+		var p raft_cmdpb.RaftCmdResponse
+		p.Header = &raft_cmdpb.RaftResponseHeader{
+			Error:       nil,
+			CurrentTerm: d.peer.Term(),
+		}
+
+		if !ok {
+			// this is a replica
+			_, dd := d.processCmd(nil, &m, &kvWB, nil, applied)
+			destroyed = destroyed || dd
+		} else {
+			if proposal.term != m.Term {
+				p = *ErrRespStaleCommand(m.Term)
+				log.Warningf("%v got index %v term mismatch (%v -> %v), but that's fine, error it out and let caller retry",
+					d.Tag, m.Index, m.Term, proposal.term)
+				_, dd := d.processCmd(nil, &m, &kvWB, nil, applied)
+				pending[proposal.cb] = outStandingReq{nil, &p}
+				destroyed = destroyed || dd
+			} else {
+				req, dd := d.processCmd(proposal.cb, &m, &kvWB, &p, applied)
+				pending[proposal.cb] = outStandingReq{req, &p}
+				destroyed = destroyed || dd
+			}
+		}
+
+		if d.peerStorage.applyState.AppliedIndex+1 != m.Index {
+			panic("here")
+		}
+
+		d.peerStorage.applyState.AppliedIndex = m.Index
+		kvWB.SetMeta(meta.ApplyStateKey(d.Region().Id), d.peerStorage.applyState)
+	}
+
+	if kvWB.Len() > 0 {
+		err = d.peerStorage.Engines.WriteKV(&kvWB)
+		if err != nil {
+			log.Panicf("write error: %v", err)
+		}
+	}
+
+	// Now replay the entire command for read
+	for cb, outstanding := range pending {
+		if outstanding.p.Header.Error != nil {
+			log.Errorf("%v error at %v",
+				d.Tag,
+				outstanding.p.Header)
+			continue
+		}
+
+		regionErr := util.CheckRegionEpoch(outstanding.req, d.Region(), true)
+		if regionErr != nil {
+			log.Errorf("%v got region epoch mismatch on reading: %v vs %v",
+				d.Tag,
+				outstanding.req.Header.RegionEpoch, d.Region().RegionEpoch)
+			// error this out
+			BindRespError(outstanding.p, regionErr)
+			continue
+		}
+
+		for idx, cmd := range outstanding.req.Requests {
+			switch cmd.CmdType {
+			case raft_cmdpb.CmdType_Snap:
+				cb.Txn = d.peerStorage.Engines.Kv.NewTransaction(false)
+				outstanding.p.Responses[idx] = &raft_cmdpb.Response{
+					CmdType: cmd.CmdType,
+					Snap: &raft_cmdpb.SnapResponse{
+						Region: &metapb.Region{
+							Id:          d.Region().Id,
+							StartKey:    d.Region().StartKey,
+							EndKey:      d.Region().EndKey,
+							RegionEpoch: d.Region().RegionEpoch,
+							Peers:       d.Region().Peers,
+						},
+					},
+				}
+			case raft_cmdpb.CmdType_Get:
+				txn := d.peerStorage.Engines.Kv.NewTransaction(false)
+				val, err := txn.Get(engine_util.KeyWithCF(cmd.Get.Cf, cmd.Get.Key))
+				if err != nil {
+					txn.Discard()
+					BindRespError(outstanding.p, err)
+				} else {
+					data, err := val.Value()
+					if err != nil {
+						panic(err)
+					}
+
+					txn.Discard()
+					outstanding.p.Responses[idx] = &raft_cmdpb.Response{
+						CmdType: cmd.CmdType,
+						Get:     &raft_cmdpb.GetResponse{Value: data},
+					}
+				}
+			}
+		}
+	}
+
+	// finally, we are safe to issue response
+	for cb, o := range pending {
+		cb.Done(o.p)
+	}
+
+	d.peer.RaftGroup.Advance(rd)
+
+	completion := time.Since(startTime)
+	if completion > time.Second {
+		log.Errorf("%v took %v to write to kv store", d.Tag, completion)
+	}
+
+	if destroyed {
+		d.destroyPeer()
+		for idx, pendingReq := range d.proposals {
+			log.Warningf("%v is destroyed, canceling req %v", d.Tag, idx)
+			var p raft_cmdpb.RaftCmdResponse
+			BindRespError(&p, &util.ErrNotLeader{RegionId: d.regionId})
+			pendingReq.cb.Done(&p)
+		}
+		d.proposals = nil
+	}
 }
 
 func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
@@ -59,7 +546,6 @@ func (d *peerMsgHandler) HandleMsg(msg message.Msg) {
 		d.onTick()
 	case message.MsgTypeSplitRegion:
 		split := msg.Data.(*message.MsgSplitRegion)
-		log.Infof("%s on split with %v", d.Tag, split.SplitKey)
 		d.onPrepareSplitRegion(split.RegionEpoch, split.SplitKey, split.Callback)
 	case message.MsgTypeRegionApproximateSize:
 		d.onApproximateRegionSize(msg.Data.(uint64))
@@ -107,13 +593,124 @@ func (d *peerMsgHandler) preProposeRaftCommand(req *raft_cmdpb.RaftCmdRequest) e
 	return err
 }
 
+// Send the commands from the application to the raft module
 func (d *peerMsgHandler) proposeRaftCommand(msg *raft_cmdpb.RaftCmdRequest, cb *message.Callback) {
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_TransferLeader {
+		if len(msg.Requests) != 0 {
+			panic(msg)
+		}
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{
+				Error:       nil,
+				Uuid:        nil,
+				CurrentTerm: d.RaftGroup.Raft.Term,
+			}}
+		d.RaftGroup.TransferLeader(msg.AdminRequest.TransferLeader.Peer.Id)
+		resp.AdminResponse = &raft_cmdpb.AdminResponse{
+			CmdType:        raft_cmdpb.AdminCmdType_TransferLeader,
+			TransferLeader: &raft_cmdpb.TransferLeaderResponse{},
+		}
+		cb.Done(resp)
+		return
+	}
+
 	err := d.preProposeRaftCommand(msg)
 	if err != nil {
 		cb.Done(ErrResp(err))
 		return
 	}
 	// Your Code Here (2B).
+	if msg.AdminRequest != nil && msg.AdminRequest.CmdType == raft_cmdpb.AdminCmdType_ChangePeer {
+		// There can be at most one pending peer adding/removing, so we check if this is done.
+		if len(msg.Requests) != 0 {
+			panic(msg)
+		}
+		resp := &raft_cmdpb.RaftCmdResponse{
+			Header: &raft_cmdpb.RaftResponseHeader{
+				Error:       nil,
+				Uuid:        nil,
+				CurrentTerm: d.RaftGroup.Raft.Term,
+			}}
+		changeReq := msg.AdminRequest.ChangePeer
+		switch changeReq.ChangeType {
+		case pb.ConfChangeType_AddNode:
+			if d.RaftGroup.Raft.IsMember(changeReq.Peer.Id) {
+				// done
+			} else {
+				// raft protocol will dedup this
+				ctx, err := msg.Marshal()
+				if err != nil {
+					panic(err)
+				}
+
+				log.Infof("%v propose adding node %v", d.Tag, changeReq.Peer.Id)
+				err = d.RaftGroup.ProposeConfChange(pb.ConfChange{
+					ChangeType: pb.ConfChangeType_AddNode,
+					NodeId:     changeReq.Peer.Id,
+					Context:    ctx,
+				})
+
+				if err != nil {
+					cb.Done(ErrResp(err))
+					return
+				}
+			}
+
+			resp.AdminResponse = &raft_cmdpb.AdminResponse{
+				CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{
+					Region: d.Region(),
+				},
+			}
+			cb.Done(resp)
+		case pb.ConfChangeType_RemoveNode:
+			if !d.RaftGroup.Raft.IsMember(changeReq.Peer.Id) {
+				// done
+			} else {
+				ctx, err := msg.Marshal()
+				if err != nil {
+					panic(err)
+				}
+				// raft protocol will dedup this
+				log.Infof("%v propose removing node %v", d.Tag, changeReq.Peer.Id)
+				err = d.RaftGroup.ProposeConfChange(pb.ConfChange{
+					ChangeType: pb.ConfChangeType_RemoveNode,
+					NodeId:     changeReq.Peer.Id,
+					Context:    ctx,
+				})
+
+				if err != nil {
+					cb.Done(ErrResp(err))
+					return
+				}
+			}
+			resp.AdminResponse = &raft_cmdpb.AdminResponse{
+				CmdType: raft_cmdpb.AdminCmdType_ChangePeer,
+				ChangePeer: &raft_cmdpb.ChangePeerResponse{
+					Region: d.Region(),
+				},
+			}
+			cb.Done(resp)
+		}
+		return
+	}
+
+	index := d.peer.nextProposalIndex()
+	term := d.peer.Term()
+	data, err := msg.Marshal()
+	if err != nil {
+		log.Panic(err)
+	}
+	err = d.peer.RaftGroup.Propose(data)
+	if err != nil {
+		log.Errorf("Proposal got error %v", err)
+		cb.Done(ErrResp(err))
+	}
+	d.peer.proposals[index] = proposal{
+		index: index,
+		term:  term,
+		cb:    cb,
+	}
 }
 
 func (d *peerMsgHandler) onTick() {
@@ -150,7 +747,7 @@ func (d *peerMsgHandler) onRaftBaseTick() {
 	d.ticker.schedule(PeerTickRaft)
 }
 
-func (d *peerMsgHandler) ScheduleCompactLog(firstIndex uint64, truncatedIndex uint64) {
+func (d *peerMsgHandler) ScheduleCompactLog(truncatedIndex uint64) {
 	raftLogGCTask := &runner.RaftLogGCTask{
 		RaftEngine: d.ctx.engine.Raft,
 		RegionID:   d.regionId,
@@ -252,12 +849,13 @@ func (d *peerMsgHandler) checkMessage(msg *rspb.RaftMessage) bool {
 	region := d.Region()
 	if util.IsEpochStale(fromEpoch, region.RegionEpoch) && util.FindPeer(region, fromStoreID) == nil {
 		// The message is stale and not in current region.
+		log.Warningf("epoch mismatch and peer does not exist. %v from:%v, current:%v, from %v, %v in %v", d.Tag, fromEpoch, region.RegionEpoch, msg.FromPeer, fromStoreID, region)
 		handleStaleMsg(d.ctx.trans, msg, region.RegionEpoch, isVoteMsg)
 		return true
 	}
 	target := msg.GetToPeer()
 	if target.Id < d.PeerId() {
-		log.Infof("%s target peer ID %d is less than %d, msg maybe stale", d.Tag, target.Id, d.PeerId())
+		log.Warningf("%s target peer ID %d is less than %d, msg maybe stale", d.Tag, target.Id, d.PeerId())
 		return true
 	} else if target.Id > d.PeerId() {
 		if d.MaybeDestroy() {
@@ -333,7 +931,7 @@ func (d *peerMsgHandler) checkSnapshot(msg *rspb.RaftMessage) (*snap.SnapKey, er
 		}
 	}
 	if !contains {
-		log.Infof("%s %s doesn't contains peer %d, skip", d.Tag, snapRegion, peerID)
+		log.Infof("%s %s doesn't contain peer %d, skip", d.Tag, snapRegion, peerID)
 		return &key, nil
 	}
 	meta := d.ctx.storeMeta
@@ -427,8 +1025,7 @@ func (d *peerMsgHandler) onRaftGCLogTick() {
 
 	term, err := d.RaftGroup.Raft.RaftLog.Term(compactIdx)
 	if err != nil {
-		log.Fatalf("appliedIdx: %d, firstIdx: %d, compactIdx: %d", appliedIdx, firstIdx, compactIdx)
-		panic(err)
+		log.Panicf("appliedIdx: %d, firstIdx: %d, compactIdx: %d", appliedIdx, firstIdx, compactIdx)
 	}
 
 	// Create a compact log request and notify directly.

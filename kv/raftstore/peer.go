@@ -83,7 +83,7 @@ type peer struct {
 
 	// Record the callback of the proposals
 	// (Used in 2B)
-	proposals []*proposal
+	proposals map[uint64]proposal
 
 	// Index of last scheduled compacted raft log.
 	// (Used in 2C)
@@ -133,6 +133,10 @@ func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, r
 		Storage:       ps,
 	}
 
+	for _, p := range region.GetPeers() {
+		raftCfg.Peers = append(raftCfg.Peers, p.Id)
+	}
+
 	raftGroup, err := raft.NewRawNode(raftCfg)
 	if err != nil {
 		return nil, err
@@ -146,6 +150,7 @@ func NewPeer(storeId uint64, cfg *config.Config, engines *engine_util.Engines, r
 		PeersStartPendingTime: make(map[uint64]time.Time),
 		Tag:                   tag,
 		ticker:                newTicker(region.GetId(), cfg),
+		proposals:             map[uint64]proposal{},
 	}
 
 	// If this region has only one peer and I am the one, campaign directly.
@@ -353,6 +358,7 @@ func (p *peer) HeartbeatScheduler(ch chan<- worker.Task) {
 		Peer:            p.Meta,
 		PendingPeers:    p.CollectPendingPeers(),
 		ApproximateSize: p.ApproximateSize,
+		Term:            p.RaftGroup.Raft.Term,
 	}
 }
 

@@ -1,3 +1,17 @@
+# Progress
+|Module|Status|
+|-|-|
+| Project 1 | Done |
+| Project 2a| Done |
+| Project 2b| Done |
+| Project 2c| Done |
+| Project 3a| Done |
+| Project 3b| Done |
+| Project 3c| De-scoped, using official placement driver v3.0.13 : )|
+| Project 4a| Done |
+| Project 4b| Done |
+| Project 4c| Done (No error handling) |
+
 # The TinyKV Course
 
 This is a series of projects on a key-value storage system built with the Raft consensus algorithm. These projects are inspired by the famous [MIT 6.824](http://nil.csail.mit.edu/6.824/2018/index.html) course, but aim to be closer to industry implementations. The whole course is pruned from [TiKV](https://github.com/tikv/tikv) and re-written in Go. After completing this course, you will have the knowledge to implement a horizontal scalable, high available, key-value storage service with distributed transaction support and a better understanding of TiKV implementation.
@@ -65,35 +79,27 @@ After you finished the whole implementation, it's runnable now. You can try Tiny
 ### Build
 
 ```
-make
+make kv
 ```
 
-It builds the binary of `tinykv-server` and `tinyscheduler-server` to `bin` dir.
+It builds the binary of `tinykv-server` to `bin` dir.
 
 ### Run
-
-Put the binary of `tinyscheduler-server`, `tinykv-server` and `tinysql-server` into a single dir.
-
-Under the binary dir, run the following commands:
-
+On your laptop with local docker:
 ```
-mkdir -p data
+$ ./start-pd.sh
 ```
+To start the scheduler.
 
+Start 3 store servers (since by default replication factor is 3):
 ```
-./tinyscheduler-server
-```
-
-```
-./tinykv-server -path=data
+$ ./start-server.sh 20601
+$ ./start-server.sh 20602
+$ ./start-server.sh 20603
 ```
 
+After the placement driver does the magic, hack the client dir:
 ```
-./tinysql-server --store=tikv --path="127.0.0.1:2379"
-```
-
-### Play
-
-```
-mysql -u root -h 127.0.0.1 -P 4000
+$ make client
+$ ./bin/tinykv-client
 ```
