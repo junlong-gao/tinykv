@@ -103,6 +103,7 @@ func (txn *MvccTxn) GetValue(key []byte) ([]byte, error) {
 	startKey := EncodeKey(key, txn.StartTS)
 	endKey := EncodeKey(key, 0)
 	for iter.Seek(startKey); iter.Valid() && !engine_util.ExceedEndKey(iter.Item().Key(), endKey); iter.Next() {
+		//XXX This code is missing checking locks here.
 		v, err := iter.Item().Value()
 		if err != nil {
 			return nil, err
