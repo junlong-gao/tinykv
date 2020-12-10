@@ -1,3 +1,4 @@
+[![Gitpod ready-to-code](https://img.shields.io/badge/Gitpod-ready--to--code-blue?logo=gitpod)](https://gitpod.io/#https://github.com/tidb-incubator/tinykv)
 # Progress
 |Module|Status|
 |-|-|
@@ -11,6 +12,7 @@
 | Project 4a| Done |
 | Project 4b| Done |
 | Project 4c| Done (No error handling) |
+=======
 
 # The TinyKV Course
 
